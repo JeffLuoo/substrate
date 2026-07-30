@@ -109,20 +109,3 @@ patches:
               env:
               - name: OTEL_EXPORTER_OTLP_ENDPOINT
                 value: http://opentelemetry-collector.otel-system.svc:4317
-  # Envoy's tracing collector is passed as a container arg rather than an env
-  # var. args has no strategic-merge key, so a merge patch would replace the
-  # whole list; patch the single element positionally instead. The `test` op
-  # makes the build fail loudly if the base arg order ever changes.
-  - target:
-      group: apps
-      version: v1
-      kind: Deployment
-      name: atenet-router
-      namespace: ate-system
-    patch: |-
-      - op: test
-        path: /spec/template/spec/containers/0/args/10
-        value: --otlp-collector-address=opentelemetry-collector.gke-managed-otel.svc.cluster.local:4317
-      - op: replace
-        path: /spec/template/spec/containers/0/args/10
-        value: --otlp-collector-address=opentelemetry-collector.otel-system.svc:4317
