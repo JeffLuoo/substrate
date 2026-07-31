@@ -651,9 +651,12 @@ func TestXdsServer_SetOtlpCollector(t *testing.T) {
 }
 
 func TestXdsServer_SetOtlpCollector_Rejects(t *testing.T) {
-	// A rejected endpoint must fail startup rather than silently degrade:
-	// https downgraded to the plaintext tracer cluster would leak spans, and a
-	// garbage port would yield a cluster that never connects.
+	// An endpoint Envoy cannot use has to be reported rather than silently
+	// accepted: https downgraded to the plaintext tracer cluster would leak
+	// spans, and a garbage port would yield a cluster that never connects.
+	// Reporting it is as far as this layer goes — setOtlpCollector turns the
+	// error into a warning and runs without Envoy tracing, never a startup
+	// failure. See TestSetOtlpCollector.
 	for _, tc := range []struct {
 		name string
 		addr string

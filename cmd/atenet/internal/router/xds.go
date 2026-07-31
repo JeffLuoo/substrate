@@ -184,20 +184,29 @@ const otlpDefaultPort = "4317"
 // collector. addr empty disables tracing. See normalizeOtlpCollector for the
 // accepted forms.
 func (x *XdsServer) SetOtlpCollector(addr string) error {
-	x.mu.Lock()
-	defer x.mu.Unlock()
 	if addr == "" {
-		x.otlpHost = ""
-		x.otlpPort = 0
+		x.DisableOtlpCollector()
 		return nil
 	}
+	// normalizeOtlpCollector reads nothing off x, so it runs unlocked.
 	host, port, err := normalizeOtlpCollector(addr)
 	if err != nil {
 		return err
 	}
+	x.mu.Lock()
+	defer x.mu.Unlock()
 	x.otlpHost = host
 	x.otlpPort = port
 	return nil
+}
+
+// DisableOtlpCollector turns Envoy-side tracing off. The router's own exporter
+// is independent of this and keeps reporting spans.
+func (x *XdsServer) DisableOtlpCollector() {
+	x.mu.Lock()
+	defer x.mu.Unlock()
+	x.otlpHost = ""
+	x.otlpPort = 0
 }
 
 // normalizeOtlpCollector resolves a collector endpoint to the bare host and
@@ -211,7 +220,10 @@ func (x *XdsServer) SetOtlpCollector(addr string) error {
 //
 // https is rejected rather than downgraded — the tracer cluster carries no
 // UpstreamTlsContext, so honoring it would mean shipping spans in plaintext to
-// an endpoint that asked for TLS.
+// an endpoint that asked for TLS. Rejection here only means "Envoy cannot use
+// this", not that the router should stop: the same endpoint is usable by the
+// router's own exporter, so the caller warns and runs without Envoy-side
+// tracing (see setOtlpCollector).
 func normalizeOtlpCollector(addr string) (string, uint32, error) {
 	hostport := addr
 	if strings.Contains(addr, "://") {
@@ -222,7 +234,7 @@ func normalizeOtlpCollector(addr string) (string, uint32, error) {
 		switch u.Scheme {
 		case "http":
 		case "https":
-			return "", 0, fmt.Errorf("OTLP collector endpoint %q uses https, which Envoy-side tracing does not support: the tracer cluster is plaintext h2c. Point it at an http:// endpoint, or set --otlp-collector-address explicitly to disable (empty) or override", addr)
+			return "", 0, fmt.Errorf("OTLP collector endpoint %q uses https, which Envoy-side tracing does not support: the tracer cluster is plaintext h2c. Point --otlp-collector-address at an http:// endpoint, or pass it empty to disable Envoy-side tracing", addr)
 		default:
 			return "", 0, fmt.Errorf("OTLP collector endpoint %q has unsupported scheme %q, want http", addr, u.Scheme)
 		}
