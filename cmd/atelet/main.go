@@ -172,6 +172,7 @@ func main() {
 		imagecache.WithLocalhostRegistryReplacement(*localhostRegistryReplacement),
 		imagecache.WithActorsDir(ateompath.ActorsDir),
 		imagecache.WithMinAge(*imageCacheMinAge),
+		imagecache.WithMeter(otel.Meter("atelet")),
 	)
 	if err != nil {
 		serverboot.Fatal(ctx, "Failed to open image cache", err)

@@ -123,6 +123,7 @@ Agent Substrate emits foundational OpenTelemetry system and server metrics to mo
 | `ate.scheduler.assignment.duration` | ateapi | histogram | time it takes for an actor to be assigned to a worker, per attempt (version-conflict retries record only the final attempt), with the outcome (`assigned` / `no_free_worker` / `error`) and sandbox class to catch scheduling latency and capacity starvation problems |
 | `ate.actor.restore.duration` | atelet | histogram | how long each phase of a restore takes on the worker node, which is where cold-start latency actually goes once ateapi hands off (labels `ate.snapshot.phase`, `ate.snapshot.kind`, `ate.snapshot.scope`, `ate.template.namespace`, `ate.template.name`, `ate.sandbox.class`, plus `ate.failure.reason` on failure) |
 | `ate.actor.checkpoint.duration` | atelet | histogram | the same phase breakdown for writing a snapshot, so a slow suspend can be attributed to ateom or to the upload (same labels as the restore histogram) |
+| `ate.imagecache.requests` | atelet | counter | image lookups in the node-local image cache, by outcome (`ate.imagecache.outcome`), with `error.type` on the `error` outcome. A miss pays for the pull and the unpack, so the hit ratio per node is a leading indicator of resume latency |
 
 The table lists the OpenTelemetry instrument names. How a name appears in a query depends on the backend (Cloud Monitoring (GMP) / Kind collector).
 
@@ -136,6 +137,10 @@ For `atenet.router.route.duration`:
 
 For `ate.scheduler.eligible_workers`:
 * `ate.scheduling.constraint` categorizes the scheduling request constraint type: `none` (unconstrained), `selector` (actor or template label selectors specified), or `required_nodes` (pinned to specific node VMs).
+
+For `ate.imagecache.requests`:
+* `ate.imagecache.outcome` is `hit` when the node holds a complete image record — every layer directory the record names is present — and `miss` when the lookup must pull. A failed lookup is neither: `error` is a failed lookup whatever the cause, and `cancelled` or `timeout` is the caller giving up, as on `ate.router.outcome`. So the hit ratio is `hit / (hit + miss)`, with failures and abandoned lookups out of the denominator.
+* `error.type` is present only on the `error` outcome, and carries the registry's own HTTP status for its rejection, from a fixed set: `401`, `403`, `404`, `429`, `500`, `502`, `503`, `504`. The set is an allow-list because the registry client reports whatever the remote returned. Each other status, and each failure that carries no status, reports `_OTHER`.
 
 The three snapshot labels are orthogonal and mean the same thing on every histogram that carries them:
 * `ate.snapshot.kind`: which snapshot the operation reads or writes. `local` (node-local, written by a pause), `latest` (the actor's own durable snapshot), `golden` (the template's image), or `boot` (from scratch, so it never appears on the atelet histograms).
