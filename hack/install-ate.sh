@@ -69,6 +69,7 @@ function usage() {
   echo "  --ateapi-client-auth=cert|token        Select how in-cluster clients authenticate to ateapi for --deploy-ate-system (default: cert; the server always accepts both)"
   echo "  --atenet-router=envoy|agentgateway     Select the atenet router dataplane (default: envoy)"
   echo "  --store-backend=redis|postgres         Configure the ateapi store backend (default: redis)"
+  echo "  --otlp-endpoint URL                    Send all control plane telemetry to URL, not to the cluster default (see benchmarking/telemetry/README.md)"
   echo ""
   echo "Infrastructure components:"
   echo ""
@@ -246,6 +247,47 @@ apply_otel_config() {
   else
     run_kubectl apply -f manifests/ate-install/ate-otel-config.yaml
   fi
+}
+
+# --otlp-endpoint sends all control plane telemetry to a different collector for
+# the duration of a measurement. One patch is sufficient: each component reads
+# this ConfigMap through envFrom, and ate-controller copies the values to the
+# ateom worker pods that it creates. See benchmarking/telemetry/README.md.
+#
+# Call this AFTER every apply. The ate-system bundle contains its own copy of
+# ate-otel-config, thus an apply of the bundle replaces a patch that came
+# before it, and the endpoint returns to the cluster default with no error
+# message.
+#
+# A change to a ConfigMap starts no rollout, because the pod template stays the
+# same. Thus restart the consumers that read it. Do the restart only when the
+# value changes: a restart during the rollout of the bundle makes the two
+# rollouts compete, and `kubectl rollout status` can then exceed its timeout.
+# An absent workload is not an error, because a deploy of one component has
+# only that component.
+apply_otel_endpoint_override() {
+  if [[ -z "${ATE_OTLP_ENDPOINT:-}" ]]; then
+    return 0
+  fi
+
+  local current=""
+  current="$(run_kubectl -n ate-system get configmap ate-otel-config \
+    -o jsonpath='{.data.OTEL_EXPORTER_OTLP_ENDPOINT}' 2>/dev/null || true)"
+  if [[ "${current}" == "${ATE_OTLP_ENDPOINT}" ]]; then
+    return 0
+  fi
+
+  echo "Overriding OTEL_EXPORTER_OTLP_ENDPOINT with ${ATE_OTLP_ENDPOINT}"
+  run_kubectl -n ate-system patch configmap ate-otel-config --type=merge \
+    -p "{\"data\":{\"OTEL_EXPORTER_OTLP_ENDPOINT\":\"${ATE_OTLP_ENDPOINT}\"}}"
+
+  local workload
+  for workload in deployment/ate-api-server deployment/ate-controller \
+                  deployment/atenet-router daemonset/atelet; do
+    if run_kubectl -n ate-system get "${workload}" >/dev/null 2>&1; then
+      run_kubectl -n ate-system rollout restart "${workload}"
+    fi
+  done
 }
 
 # Extract a CA pool secret's RootCertificateDER and emit it as a PEM certificate.
@@ -513,6 +555,9 @@ deploy_ate_system() {
   run_kubectl rollout status deployment/atenet-router -n ate-system --timeout=120s
   run_kubectl rollout status deployment/atenet-egress -n ate-system --timeout=120s
   run_kubectl rollout status daemonset/atelet -n ate-system --timeout=120s
+
+  # After the bundle, which carries its own copy of ate-otel-config.
+  apply_otel_endpoint_override
 }
 
 # Ensure secrets and configmaps required by ate-apiserver
@@ -545,6 +590,7 @@ deploy_ate_apiserver() {
 
   ensure_apiserver_prerequisites
   apply_otel_config
+  apply_otel_endpoint_override
 
   run_ko apply -f manifests/ate-install/ate-api-server.yaml
   run_kubectl rollout status deployment/ate-api-server -n ate-system --timeout=120s
@@ -559,6 +605,7 @@ deploy_atelet() {
     && run_kubectl wait --for=jsonpath='{.status.phase}'=Active namespace/ate-system --timeout=60s
 
   apply_otel_config
+  apply_otel_endpoint_override
 
   local manifest=""
   if [[ "${ATE_INSTALL_KIND:-false}" == "true" ]]; then
@@ -581,6 +628,7 @@ deploy_atenet() {
     && run_kubectl wait --for=jsonpath='{.status.phase}'=Active namespace/ate-system --timeout=60s
 
   apply_otel_config
+  apply_otel_endpoint_override
 
   local router_manifest=""
   router_manifest="$(render_atenet_router_manifest)"
@@ -722,10 +770,14 @@ deploy_benchmarks() {
   if [[ "${BENCHMARK_SANDBOX_CLASS}" == "microvm" ]]; then
     "${ROOT}/hack/install-microvm-deps.sh" --install
   fi
-  "${ROOT}/benchmarking/deploy_locust.sh" \
-    --deploy \
-    --worker-count "${BENCHMARK_WORKER_COUNT}" \
-    --sandbox-class "${BENCHMARK_SANDBOX_CLASS}"
+  # Send the actor telemetry to the same place as the control plane telemetry.
+  local benchmark_args=(--deploy
+    --worker-count "${BENCHMARK_WORKER_COUNT}"
+    --sandbox-class "${BENCHMARK_SANDBOX_CLASS}")
+  if [[ -n "${ATE_OTLP_ENDPOINT:-}" ]]; then
+    benchmark_args+=(--otlp-endpoint "${ATE_OTLP_ENDPOINT}")
+  fi
+  "${ROOT}/benchmarking/deploy_locust.sh" "${benchmark_args[@]}"
 }
 
 delete_benchmarks() {
@@ -812,6 +864,14 @@ for ((i = 0; i < ${#prescan_args[@]}; i++)); do
     --benchmark-sandbox-class=*)
       BENCHMARK_SANDBOX_CLASS="${prescan_args[i]#*=}"
       ;;
+    --otlp-endpoint)
+      if (( i + 1 >= ${#prescan_args[@]} )); then
+        echo "Error: --otlp-endpoint requires a URL" >&2
+        exit 1
+      fi
+      ATE_OTLP_ENDPOINT="${prescan_args[$((i + 1))]}"
+      ;;
+    --otlp-endpoint=*) ATE_OTLP_ENDPOINT="${prescan_args[i]#*=}" ;;
     --setup-csi)
       SETUP_CSI=true
       ;;
@@ -895,6 +955,8 @@ while [[ "$#" -gt 0 ]]; do
     --benchmark-worker-count=*) ;;
     --benchmark-sandbox-class) shift ;;
     --benchmark-sandbox-class=*) ;;
+    --otlp-endpoint) shift ;;
+    --otlp-endpoint=*) ;;
 
     --create-jwt-authority-pool-secret) create_jwt_authority_pool_secret ;;
     --create-actor-id-ca-pool-secret) create_actor_id_ca_pool_secret ;;
