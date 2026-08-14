@@ -251,18 +251,16 @@ func NormalizeSandboxClass(class string) string {
 	}
 }
 
-// WorkerPoolAttributes returns the namespaced identity of a WorkerPool. The two
-// keys are always set together, or not at all: a WorkerPool is namespaced, so
-// the name alone merges same-named pools from different namespaces into one
-// series, and it cannot join against the instruments that carry the pair. An
-// empty name means no pool is assigned yet, which reports as an absent pair
-// rather than an empty-string series.
+// WorkerPoolAttributes returns the namespaced identity of a WorkerPool. A
+// WorkerPool is namespaced, so half the pair identifies no pool: either key
+// missing drops both, rather than emit an empty-string series that merges
+// same-named pools and joins to nothing.
 //
-// Pool-centric instruments that record a deliberate zero-valued series for "no
-// pool matched" build the pair themselves; this helper is for the actor-centric
-// instruments, where an unknown pool is omitted.
+// This is for the actor-centric instruments, where an unknown pool is omitted.
+// Pool-centric ones that record a deliberate zero-valued series for "no pool
+// matched" build the pair themselves.
 func WorkerPoolAttributes(namespace, name string) []attribute.KeyValue {
-	if name == "" {
+	if name == "" || namespace == "" {
 		return nil
 	}
 	return []attribute.KeyValue{

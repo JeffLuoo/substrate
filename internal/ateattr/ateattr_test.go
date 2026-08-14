@@ -336,6 +336,14 @@ func TestWorkerPoolAttributes(t *testing.T) {
 			}
 		}
 	})
+
+	// The reverse of the case this helper exists for: a name without a namespace
+	// half-identifies the pool, which joins to nothing on the paired instruments.
+	t.Run("name without a namespace returns neither key", func(t *testing.T) {
+		if got := WorkerPoolAttributes("", "pool-a"); len(got) != 0 {
+			t.Errorf("WorkerPoolAttributes(\"\", \"pool-a\") = %v, want no attributes", got)
+		}
+	})
 }
 
 // TestSnapshotScopeValue pins the enum-to-label mapping ateapi and atelet share.
