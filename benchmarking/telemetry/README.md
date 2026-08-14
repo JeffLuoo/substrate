@@ -128,7 +128,7 @@ the pass criteria:
 sum(rate(otelcol_receiver_refused_spans[5m]))   # must be 0
 sum(rate(otelcol_exporter_sent_spans[5m]))      # must be more than 0
 max_over_time(otelcol_exporter_queue_size[5m])  # must stay level
-absent(otelcol_exporter_queue_size)             # must give no result
+absent(otelcol_exporter_sent_spans)             # must give no result
 ```
 
 Do not use `otelcol_exporter_send_failed_spans` alone. The default
