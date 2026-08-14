@@ -251,6 +251,26 @@ func NormalizeSandboxClass(class string) string {
 	}
 }
 
+// WorkerPoolAttributes returns the namespaced identity of a WorkerPool. The two
+// keys are always set together, or not at all: a WorkerPool is namespaced, so
+// the name alone merges same-named pools from different namespaces into one
+// series, and it cannot join against the instruments that carry the pair. An
+// empty name means no pool is assigned yet, which reports as an absent pair
+// rather than an empty-string series.
+//
+// Pool-centric instruments that record a deliberate zero-valued series for "no
+// pool matched" build the pair themselves; this helper is for the actor-centric
+// instruments, where an unknown pool is omitted.
+func WorkerPoolAttributes(namespace, name string) []attribute.KeyValue {
+	if name == "" {
+		return nil
+	}
+	return []attribute.KeyValue{
+		WorkerPoolNamespaceKey.String(namespace),
+		WorkerPoolNameKey.String(name),
+	}
+}
+
 // ActorRefAttributes returns the subset knowable before the Actor record
 // resolves: only the (atespace, name) the request addresses. The uid and version
 // are server-assigned and unknown until the record loads, so they are omitted.
@@ -275,6 +295,9 @@ func ActorAttributes(a *ateapipb.Actor) []attribute.KeyValue {
 
 // ActorMetricAttributes returns the metric labels for an Actor.
 // High-cardinality attributes (atespace, actor name, actor uid) are omitted.
+// The worker-pool pair is omitted while the actor holds no assignment, so a
+// crash before the actor reaches a worker reports no pool rather than an
+// empty-string one.
 func ActorMetricAttributes(a *ateapipb.Actor, sandboxClass, operationName, reason string) []attribute.KeyValue {
 	if a == nil {
 		return nil
@@ -286,17 +309,13 @@ func ActorMetricAttributes(a *ateapipb.Actor, sandboxClass, operationName, reaso
 	}
 	operationName = NormalizeOperationName(operationName)
 
-	pool := ""
-	if ass := a.GetWorkerAssignment(); ass != nil {
-		pool = ass.GetWorkerPool()
-	}
-
-	return []attribute.KeyValue{
+	ass := a.GetWorkerAssignment()
+	attrs := []attribute.KeyValue{
 		TemplateNamespaceKey.String(a.GetActorTemplateNamespace()),
 		TemplateNameKey.String(a.GetActorTemplateName()),
-		WorkerPoolNameKey.String(pool),
 		SandboxClassKey.String(sandboxClass),
 		ActorOperationNameKey.String(operationName),
 		FailureReasonKey.String(reason),
 	}
+	return append(attrs, WorkerPoolAttributes(ass.GetWorkerNamespace(), ass.GetWorkerPool())...)
 }

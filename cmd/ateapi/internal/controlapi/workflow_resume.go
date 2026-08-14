@@ -419,6 +419,7 @@ func schedulerRecordable(err error) bool {
 func (w *ActorWorkflow) assignWorkerAttempt(ctx context.Context, actorRef resources.ActorRef, actor *ateapipb.Actor, actorTemplate *atev1alpha1.ActorTemplate) (_ *ateapipb.Actor, _ *ateapipb.Worker, err error) {
 	start := time.Now()
 	outcome := ateattr.SchedulerOutcomeError
+	poolNamespace := ""
 	pool := ""
 	class := ""
 	if actorTemplate != nil {
@@ -426,7 +427,7 @@ func (w *ActorWorkflow) assignWorkerAttempt(ctx context.Context, actorRef resour
 	}
 	defer func() {
 		if schedulerRecordable(err) {
-			w.instruments.recordSchedulerAssignment(ctx, start, outcome, pool, class, err)
+			w.instruments.recordSchedulerAssignment(ctx, start, outcome, poolNamespace, pool, class, err)
 		}
 	}()
 
@@ -531,6 +532,7 @@ func (w *ActorWorkflow) assignWorkerAttempt(ctx context.Context, actorRef resour
 			return nil, nil, status.Errorf(codes.Aborted, "actor %s is %s and can no longer be resumed", actorRef, fresh.GetStatus())
 		}
 	}
+	poolNamespace = assignedWorker.GetWorkerNamespace()
 	pool = assignedWorker.GetWorkerPool()
 	outcome = ateattr.SchedulerOutcomeAssigned
 	return storedActor, assignedWorker, nil
