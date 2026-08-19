@@ -21,6 +21,11 @@ to JSONL, and uploads everything to either GCS or local disk under
 When the test target is glutton.py, also spawns the boomer-glutton Go
 worker as a subprocess (locust runs in --master + --expect-workers=1
 mode) so the GluttonUser load comes from boomer instead of Python+gevent.
+
+With --ladder, the run is a sequence of steps rather than one flat load:
+shapes/ladder_shape.py is loaded next to the test file and drives the user
+count (and optionally the sample rate) from step to step. The shape owns
+the duration in that mode, so -t is not forwarded to locust.
 """
 
 import argparse
@@ -43,6 +48,15 @@ from common.boomer_config import build_config_json
 # Path inside the locust image to the boomer-glutton binary baked in by
 # benchmarking/locust/Dockerfile.
 BOOMER_BINARY = "/app/boomer-glutton"
+
+# Loaded next to the test file for a --ladder run. It holds no user class, so
+# locust must never get it on its own.
+LADDER_SHAPE = str(Path(__file__).resolve().parent / "shapes" / "ladder_shape.py")
+
+# Port for the headless /boomer-config server (common/boomer_config.py), which
+# a --ladder run needs so boomer picks up a step's sample rate. Locust already
+# holds 5557 (master) and 8089 (web UI) in this container.
+BOOMER_CONFIG_PORT = 5560
 
 # Tab-separated columns written to traces.txt. Order matters — readers split
 # on \t and index positionally.
@@ -75,6 +89,15 @@ def parse_args() -> argparse.Namespace:
         required=True,
         help="Root destination (gs://bucket/path or local path)",
     )
+    p.add_argument(
+        "--allow-empty-stats",
+        action="store_true",
+        help=(
+            "Exit 0 when locust produced no measurement rows. For a run whose "
+            "result is not in the locust statistics, such as the idle floor of "
+            "the observability ladder, which sends no request on purpose"
+        ),
+    )
     args, extra = p.parse_known_args()
     args.locust_extra = extra
     return args
@@ -96,6 +119,20 @@ def needs_boomer(test_file: str) -> bool:
     return os.path.basename(test_file) not in PYTHON_TESTS
 
 
+def ladder_spec(locust_extra: list[str]) -> str:
+    """Return the --ladder value in `locust_extra`, or "" when there is none.
+
+    Accepts both `--ladder X` and `--ladder=X`, the two forms tests.yaml can
+    produce from its `flags` list.
+    """
+    for i, arg in enumerate(locust_extra):
+        if arg == "--ladder" and i + 1 < len(locust_extra):
+            return locust_extra[i + 1]
+        if arg.startswith("--ladder="):
+            return arg.split("=", 1)[1]
+    return ""
+
+
 def tee(logs: TextIO, msg: str) -> None:
     print(msg, flush=True)
     logs.write(msg + "\n")
@@ -114,6 +151,8 @@ def log_run_config(args: argparse.Namespace, dest_prefix: str, work_dir: Path, l
         f"  duration:       {args.duration}",
         f"  users:          {args.users}",
         f"  uses_boomer:    {needs_boomer(args.file)}",
+        f"  ladder:         {ladder_spec(args.locust_extra) or '(none)'}",
+        f"  empty stats ok: {args.allow_empty_stats}",
         f"  dest_prefix:    {dest_prefix}",
         f"  work_dir:       {work_dir}",
         f"  extra flags:    {' '.join(args.locust_extra) if args.locust_extra else '(none)'}",
@@ -185,19 +224,31 @@ def run_test(args: argparse.Namespace, csv_prefix: Path, logs: TextIO, traces: T
     siphoned into traces.txt as a deduped one-per-line list.
     """
     with_boomer = needs_boomer(args.file)
+    ladder = ladder_spec(args.locust_extra)
+
+    # A ladder holds a step's user count for the step's duration and then
+    # moves on, so the shape decides both the load and the end of the run.
+    # Passing -t as well would cut the ladder off at an arbitrary step, and
+    # -u would only be the count before the first tick.
+    locust_files = f"{args.file},{LADDER_SHAPE}" if ladder else args.file
 
     locust_cmd = [
         sys.executable, "-m", "locust",
         "--headless",
-        "-f", args.file,
-        "-t", args.duration,
+        "-f", locust_files,
         "-u", str(args.users),
         "--csv", str(csv_prefix),
     ]
+    if not ladder:
+        locust_cmd += ["-t", args.duration]
     if with_boomer:
         # Master mode so boomer can connect as a worker on localhost:5557.
         # --expect-workers=1 makes locust wait for boomer before starting.
         locust_cmd += ["--master", "--expect-workers", "1"]
+    if ladder and with_boomer:
+        # --config-json is read once at boomer start, so a step that changes
+        # the sample rate needs the endpoint instead.
+        locust_cmd += ["--boomer-config-port", str(BOOMER_CONFIG_PORT)]
     locust_cmd += list(args.locust_extra)
 
     tee(logs, f"Running: {' '.join(locust_cmd)}")
@@ -222,6 +273,12 @@ def run_test(args: argparse.Namespace, csv_prefix: Path, logs: TextIO, traces: T
         cfg_json = build_config_json(args.locust_extra)
         if cfg_json:
             boomer_cmd += ["--config-json", cfg_json]
+        if ladder:
+            # Refetch on each spawn message. A step change is a spawn
+            # message, so the step's sample rate reaches boomer as the step
+            # starts. boomer's --master-host already defaults to the
+            # loopback address, which is where the server listens.
+            boomer_cmd += ["--master-web-port", str(BOOMER_CONFIG_PORT)]
         tee(logs, f"Running: {' '.join(boomer_cmd)}")
         boomer_proc = subprocess.Popen(
             boomer_cmd,
@@ -394,7 +451,7 @@ def main() -> None:
         upload(src, dest)
         print(f"Uploaded {src} -> {dest}", flush=True)
 
-    if not stats_generated:
+    if not stats_generated and not args.allow_empty_stats:
         sys.exit(1)
 
 
