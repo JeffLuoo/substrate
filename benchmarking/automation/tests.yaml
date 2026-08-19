@@ -20,6 +20,13 @@
 # Optional `flags` is a list of arbitrary strings appended to runner.py's
 # argv; runner.py forwards them to locust verbatim.
 #
+# `--ladder users:duration[:trace_probability],...` in `flags` turns the test
+# into a sequence of steps in one run (benchmarking/locust/shapes/ladder_shape.py).
+# The shape then owns the load and the end of the run, so runner.py stops
+# forwarding `-t` and `users` becomes the count before the first tick only.
+# Keep `duration` at the total of the steps: the orchestrator sizes the Job
+# timeout from it.
+#
 # Optional `workerCount` (default 1) sets the WorkerPool replica count for
 # the deploy that runs before this test. The orchestrator redeploys
 # workloads between tests, so each test can pick its own scale.
@@ -85,6 +92,71 @@ tests:
     flags:
       - "--min-wait-time"
       - "0.5"
+      - "--max-wait-time"
+      - "1.0"
+  # The observability ladder of benchmarking/observability.md. Each entry
+  # runs on glutton, and thus on boomer: Python and gRPC hold each other at
+  # a high number of users, which would make the latency of the load
+  # generator part of the measurement.
+  - name: observability_s0_idle_floor
+    description: "Observability S0: the telemetry of an idle control plane, 5 minutes"
+    targetCluster: dev
+    file: /app/tests/glutton.py
+    duration: 5m
+    users: 0
+    workerCount: 10
+    flags:
+      # The floor sends no request, thus locust writes no measurement row and
+      # the result of the run is in the telemetry counts only.
+      - "--allow-empty-stats"
+      - "--ladder"
+      - "0:5m"
+      - "--trace-probability"
+      - "0.1"
+  - name: observability_s1_user_sweep
+    description: "Observability S1: user sweep 5 -> 10 -> 15, 3 minutes for each step"
+    targetCluster: dev
+    file: /app/tests/glutton.py
+    duration: 9m
+    users: 5
+    workerCount: 10
+    flags:
+      - "--ladder"
+      - "5:3m,10:3m,15:3m"
+      - "--trace-probability"
+      - "0.1"
+      - "--min-wait-time"
+      - "1.0"
+      - "--max-wait-time"
+      - "1.0"
+  - name: observability_s2_sample_rate_sweep
+    description: "Observability S2: sample rate 0 -> 0.1 -> 1.0 at 10 users, 3 minutes for each step"
+    targetCluster: dev
+    file: /app/tests/glutton.py
+    duration: 9m
+    users: 10
+    workerCount: 10
+    flags:
+      - "--ladder"
+      - "10:3m:0,10:3m:0.1,10:3m:1.0"
+      - "--min-wait-time"
+      - "1.0"
+      - "--max-wait-time"
+      - "1.0"
+  - name: observability_s3_soak
+    description: "Observability S3: 12 users for 10 minutes, 80% of the S1 maximum"
+    targetCluster: dev
+    file: /app/tests/glutton.py
+    duration: 10m
+    users: 12
+    workerCount: 10
+    flags:
+      - "--ladder"
+      - "12:10m"
+      - "--trace-probability"
+      - "0.1"
+      - "--min-wait-time"
+      - "1.0"
       - "--max-wait-time"
       - "1.0"
   - name: durdir_data_baseline
