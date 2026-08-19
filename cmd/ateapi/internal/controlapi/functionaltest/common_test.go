@@ -91,6 +91,8 @@ type testContext struct {
 	// setupAteletOnNode waits on it so a test never dials a node whose atelet the
 	// informer has not seen yet.
 	ateletIndexer cache.Indexer
+	// metricReader collects what the service's instruments recorded.
+	metricReader *sdkmetric.ManualReader
 }
 
 // setupTest sets up a fully isolated test environment.
@@ -171,7 +173,8 @@ func setupTestWithVolumePlugins(t *testing.T, ns string, plugins map[string]volu
 			return insecure.NewCredentials(), nil
 		}))
 
-	instruments, err := controlapi.NewInstruments(sdkmetric.NewMeterProvider(sdkmetric.WithReader(sdkmetric.NewManualReader())).Meter("ateapi"))
+	metricReader := sdkmetric.NewManualReader()
+	instruments, err := controlapi.NewInstruments(sdkmetric.NewMeterProvider(sdkmetric.WithReader(metricReader)).Meter("ateapi"))
 	if err != nil {
 		cancel()
 		mr.Close()
@@ -263,6 +266,7 @@ func setupTestWithVolumePlugins(t *testing.T, ns string, plugins map[string]volu
 		workerPoolLister:    workerPoolLister,
 		sandboxConfigLister: sandboxConfigLister,
 		ateletIndexer:       ateletInformer.GetIndexer(),
+		metricReader:        metricReader,
 	}
 }
 

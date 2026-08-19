@@ -27,6 +27,7 @@ import (
 	"github.com/agent-substrate/substrate/internal/resources"
 	atev1alpha1 "github.com/agent-substrate/substrate/pkg/api/v1alpha1"
 	"github.com/agent-substrate/substrate/pkg/proto/ateapipb"
+	"go.opentelemetry.io/otel/attribute"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 )
@@ -39,10 +40,16 @@ func (w *ActorWorkflow) PauseActor(ctx context.Context, actorRef resources.Actor
 	var actor *ateapipb.Actor
 	var actorTemplate *atev1alpha1.ActorTemplate
 	var wireSnapshotScope string
+	// Set just before finalize; nil until then, so earlier exits label
+	// themselves from the record they hold.
+	var finalAttrs []attribute.KeyValue
 
 	defer func() {
-		w.instruments.recordLifecycleOp(ctx, ateattr.OperationPause, start, err,
-			lifecycleOpAttrs(actor, actorTemplate, "", wireSnapshotScope)...)
+		attrs := finalAttrs
+		if attrs == nil {
+			attrs = lifecycleOpAttrs(actor, actorTemplate, "", wireSnapshotScope)
+		}
+		w.instruments.recordLifecycleOp(ctx, ateattr.OperationPause, start, err, attrs...)
 	}()
 
 	lockCtx, lock, err := w.acquireActorLock(ctx, actorRef)
@@ -74,6 +81,9 @@ func (w *ActorWorkflow) PauseActor(ctx context.Context, actorRef resources.Actor
 	if err = w.ensureVolumesDetached(lockCtx, actor, actorTemplate, "DetachVolumesForPause", ateattr.OperationPause); err != nil {
 		return nil, err
 	}
+	// FinalizePaused clears the WorkerAssignment the labels read, so snapshot
+	// them here, as crash.go does for the crash counter.
+	finalAttrs = lifecycleOpAttrs(actor, actorTemplate, "", wireSnapshotScope)
 	var finalized *ateapipb.Actor
 	if finalized, err = w.ensurePausedFinalized(lockCtx, actorRef, actorTemplate); err != nil {
 		return nil, err

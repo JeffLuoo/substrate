@@ -32,6 +32,7 @@ import (
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-cmp/cmp/cmpopts"
 	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/proto"
@@ -3034,4 +3035,106 @@ func TestResumeActor_RelocatesAfterSuspendFromPaused(t *testing.T) {
 	if got := worker.GetNodeName(); got != "node2" {
 		t.Errorf("worker-2 node = %q, want node2", got)
 	}
+}
+
+// TestLifecycleOpPoolAttributesOnSuccess is the regression test for #957: a
+// successful suspend and pause must stamp the pool they ran on. Both recorded
+// the histogram from a defer that read the finalized record, whose assignment
+// the finalize step had already cleared, so the pair landed only on failures.
+func TestLifecycleOpPoolAttributesOnSuccess(t *testing.T) {
+	tests := []struct {
+		name string
+		op   string
+		// run performs the operation on an actor that is already RUNNING.
+		run func(t *testing.T, tc *testContext, actor *ateapipb.ObjectRef)
+	}{
+		{
+			name: "suspend",
+			op:   ateattr.OperationSuspend,
+			run: func(t *testing.T, tc *testContext, actor *ateapipb.ObjectRef) {
+				t.Helper()
+				if _, err := tc.client.SuspendActor(context.Background(), &ateapipb.SuspendActorRequest{Actor: actor}); err != nil {
+					t.Fatalf("SuspendActor failed: %v", err)
+				}
+			},
+		},
+		{
+			name: "pause",
+			op:   ateattr.OperationPause,
+			run: func(t *testing.T, tc *testContext, actor *ateapipb.ObjectRef) {
+				t.Helper()
+				if _, err := tc.client.PauseActor(context.Background(), &ateapipb.PauseActorRequest{Actor: actor}); err != nil {
+					t.Fatalf("PauseActor failed: %v", err)
+				}
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ns := namespaceForTest("ns-lifecycle-pool-" + tt.name)
+			tc := setupTest(t, ns)
+			defer tc.cleanup()
+
+			createTemplate(t, tc, ns)
+			createWorkerPod(t, tc, ns, "worker-1", "node1", "pool1")
+
+			actorRef := &ateapipb.ObjectRef{Atespace: testAtespace, Name: "id1"}
+			if _, err := tc.client.CreateActor(context.Background(), &ateapipb.CreateActorRequest{Actor: &ateapipb.Actor{
+				Metadata:               &ateapipb.ResourceMetadata{Atespace: actorRef.GetAtespace(), Name: actorRef.GetName()},
+				ActorTemplateNamespace: ns,
+				ActorTemplateName:      "tmpl1",
+			}}); err != nil {
+				t.Fatalf("CreateActor failed: %v", err)
+			}
+			if _, err := tc.client.ResumeActor(context.Background(), &ateapipb.ResumeActorRequest{Actor: actorRef}); err != nil {
+				t.Fatalf("ResumeActor failed: %v", err)
+			}
+
+			tt.run(t, tc, actorRef)
+
+			attrs := lifecycleOpAttributes(t, tc, tt.op)
+			if got, ok := attrs.Value(ateattr.WorkerPoolNamespaceKey); !ok || got.AsString() != ns {
+				t.Errorf("%s = %q (present: %v), want %q", ateattr.WorkerPoolNamespaceKey, got.AsString(), ok, ns)
+			}
+			if got, ok := attrs.Value(ateattr.WorkerPoolNameKey); !ok || got.AsString() != "pool1" {
+				t.Errorf("%s = %q (present: %v), want %q", ateattr.WorkerPoolNameKey, got.AsString(), ok, "pool1")
+			}
+			// error.type's absence marks a success, so its presence would mean the
+			// datapoint under test is not the happy path.
+			if _, ok := attrs.Value(ateattr.ErrorTypeKey); ok {
+				t.Errorf("%s is set on the %s datapoint, want the successful operation", ateattr.ErrorTypeKey, tt.op)
+			}
+		})
+	}
+}
+
+// lifecycleOpAttributes returns the attribute set of the single
+// ate.actor.lifecycle.operation.duration datapoint recorded for op.
+func lifecycleOpAttributes(t *testing.T, tc *testContext, op string) attribute.Set {
+	t.Helper()
+	var rm metricdata.ResourceMetrics
+	if err := tc.metricReader.Collect(context.Background(), &rm); err != nil {
+		t.Fatalf("collect metrics: %v", err)
+	}
+	var got []attribute.Set
+	for _, sm := range rm.ScopeMetrics {
+		for _, m := range sm.Metrics {
+			if m.Name != "ate.actor.lifecycle.operation.duration" {
+				continue
+			}
+			hist, ok := m.Data.(metricdata.Histogram[float64])
+			if !ok {
+				t.Fatalf("%s data type = %T, want a float64 histogram", m.Name, m.Data)
+			}
+			for _, dp := range hist.DataPoints {
+				if v, ok := dp.Attributes.Value(ateattr.ActorOperationNameKey); ok && v.AsString() == op {
+					got = append(got, dp.Attributes)
+				}
+			}
+		}
+	}
+	if len(got) != 1 {
+		t.Fatalf("datapoints for %s = %d (%v), want exactly one", op, len(got), got)
+	}
+	return got[0]
 }
