@@ -33,6 +33,55 @@ data:
             endpoint: 0.0.0.0:4318
     processors:
       batch:
+
+      # The count connector below sends deltas, and the Prometheus exporter
+      # reads the new start timestamp of each batch as a reset. Without
+      # deltatocumulative the counts do not accumulate and each scrape shows
+      # only the last batch.
+      deltatocumulative:
+
+      # The count connector reads the attributes of a span or a datapoint,
+      # and not the attributes of the resource, thus service.name is not
+      # visible to it. Copy service.name to an attribute of the item. Without
+      # the copy the connector has nothing to group by and counts every
+      # service into one bucket.
+      #
+      # The name is svc, and not job, because Prometheus sets job to the name
+      # of the scrape job.
+      transform/svc:
+        error_mode: ignore
+        trace_statements:
+          - context: span
+            statements:
+              - set(attributes["svc"], resource.attributes["service.name"])
+        metric_statements:
+          - context: datapoint
+            statements:
+              - set(attributes["svc"], resource.attributes["service.name"])
+
+    # The volume of telemetry for each service, the same two counts that
+    # benchmarking/telemetry/meter.yaml gives on GKE. On GKE the managed
+    # collector cannot hold a connector, thus a measurement there needs a
+    # second collector in front of it. Here the collector is ours, thus the
+    # counts belong in it and kind needs no meter.
+    connectors:
+      count:
+        spans:
+          substrate_spans:
+            description: Spans received, by emitting service.
+            attributes:
+              # Without a default value the connector removes each item that
+              # has no service.name from the count. The item does not show as
+              # unknown, and the totals are too low with no error message.
+              - key: svc
+                default_value: unknown
+        datapoints:
+          substrate_datapoints:
+            description: Metric datapoints received, by emitting service.
+            attributes:
+              - key: svc
+                default_value: unknown
+
     exporters:
       otlp/jaeger:
         endpoint: jaeger.otel-system.svc.cluster.local:4317
@@ -52,6 +101,38 @@ data:
           receivers: [otlp]
           processors: [batch]
           exporters: [prometheus, debug]
+
+        # The count pipelines read the same receiver as the two pipelines
+        # above. The collector gives each pipeline its own copy, and it clones
+        # the data because transform/svc changes it. Thus the svc attribute
+        # that the count needs does not reach Jaeger.
+        traces/count:
+          receivers: [otlp]
+          processors: [transform/svc]
+          exporters: [count]
+        metrics/count:
+          receivers: [otlp]
+          processors: [transform/svc]
+          exporters: [count]
+        metrics/counts:
+          receivers: [count]
+          processors: [deltatocumulative]
+          exporters: [prometheus]
+
+      # The otelcol_* counters of the collector itself. A service that reports
+      # zero volume gives no data by itself: otelcol_receiver_accepted_* shows
+      # the difference between a service that sent nothing and data that never
+      # arrived. The default reader binds to localhost, thus give the address
+      # of each interface so the Prometheus pod can reach it.
+      telemetry:
+        metrics:
+          level: detailed
+          readers:
+            - pull:
+                exporter:
+                  prometheus:
+                    host: 0.0.0.0
+                    port: 8888
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -69,6 +150,12 @@ spec:
     metadata:
       labels:
         app: opentelemetry-collector
+      annotations:
+        # The substrate_* counts, on the port of the Prometheus exporter. The
+        # otelcol_* counters are on 8888; the annotation can name one port
+        # only, thus a scrape job in prometheus.yaml collects that one.
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8889"
     spec:
       containers:
       - name: otel-collector
@@ -85,6 +172,8 @@ spec:
           containerPort: 4318
         - name: prom
           containerPort: 8889
+        - name: self
+          containerPort: 8888
       volumes:
       - name: config
         configMap:
@@ -112,6 +201,9 @@ spec:
   - name: prom
     port: 8889
     targetPort: 8889
+  - name: self
+    port: 8888
+    targetPort: 8888
 ---
 apiVersion: apps/v1
 kind: Deployment

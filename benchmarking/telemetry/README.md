@@ -61,6 +61,35 @@ only to send the actors to a different address than the control plane.
 Keep the load generator on the usual collector. If you do not, the meter counts
 the telemetry of the load generator as telemetry from substrate.
 
+## On a kind cluster
+
+Do not install the meter on kind. The collector there is ours, thus
+[`manifests/ate-install/kind/otel-collector.yaml`](../../manifests/ate-install/kind/otel-collector.yaml)
+holds the same count connector and gives the same two counts. A meter in front
+of it would add a hop and measure nothing new. The meter exists for GKE only,
+where the managed collector cannot hold a connector.
+
+`hack/install-ate.sh` installs the collector and a Prometheus with it, thus a
+kind cluster needs no other step:
+
+```bash
+kubectl port-forward -n otel-system svc/prometheus 9090:9090
+```
+
+The queries below are the same. Three items differ:
+
+- Prometheus and the collector are in `otel-system`, and not in `benchmarking`.
+- Give no `--otlp-endpoint`. The kind `ate-otel-config` ConfigMap already names
+  the collector, and `benchmarking/workloads/deploy.sh` reads that ConfigMap,
+  thus the actors follow the control plane with no flag.
+- The kind ConfigMap sets `OTEL_METRIC_EXPORT_INTERVAL` to 10s, and not to the
+  60s of GKE. Thus a range of `[1m]` is sufficient there.
+
+`monitoring.yaml` and cAdvisor are for GKE. A kind cluster measures volume
+only: its collector is a single replica with no HPA, and the memory of a node
+is the memory of the machine, thus the cost figures do not carry to a real
+cluster.
+
 ## Read the numbers
 
 [`monitoring.yaml`](../monitoring.yaml) scrapes the meter. Read the values

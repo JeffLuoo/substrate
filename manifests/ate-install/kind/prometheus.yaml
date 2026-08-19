@@ -107,6 +107,31 @@ data:
           - source_labels: [__meta_kubernetes_pod_phase]
             action: drop
             regex: Pending|Succeeded|Failed
+
+      # The otelcol_* counters of the collector, on port 8888. The annotation
+      # job above collects port 8889, which carries the substrate_* counts,
+      # and the annotation can name one port only. The two go together: when a
+      # service reports zero volume, otelcol_receiver_accepted_* shows the
+      # difference between a service that sent nothing and data that never
+      # arrived.
+      - job_name: otel-collector-self
+        kubernetes_sd_configs:
+          - role: pod
+            namespaces:
+              names:
+                - otel-system
+        relabel_configs:
+          - source_labels:
+              - __meta_kubernetes_pod_label_app
+              - __meta_kubernetes_pod_container_port_number
+            action: keep
+            regex: opentelemetry-collector;8888
+          - source_labels: [__meta_kubernetes_pod_name]
+            action: replace
+            target_label: pod
+          - source_labels: [__meta_kubernetes_namespace]
+            action: replace
+            target_label: namespace
 ---
 apiVersion: apps/v1
 kind: Deployment
