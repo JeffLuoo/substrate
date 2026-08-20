@@ -65,6 +65,8 @@ func (w *ActorWorkflow) PauseActor(ctx context.Context, actorRef resources.Actor
 	if actor.GetStatus().GetState() == ateapipb.ActorState_ACTOR_STATE_PAUSED {
 		// Fully paused already: FinalizePaused commits PAUSED and the cleared
 		// worker assignment in a single update, so there is nothing left to do.
+		// This success reports no pool, and cannot: the previous attempt
+		// released the worker, so the record names none (#957).
 		return actor, nil
 	}
 	var marked *ateapipb.Actor

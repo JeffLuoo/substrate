@@ -67,7 +67,8 @@ func (w *ActorWorkflow) SuspendActor(ctx context.Context, actorRef resources.Act
 	if actor.GetStatus().GetState() == ateapipb.ActorState_ACTOR_STATE_SUSPENDED {
 		// Fully suspended already: FinalizeSuspended commits SUSPENDED and the
 		// cleared worker assignment in a single update, so there is nothing
-		// left to do.
+		// left to do. This success reports no pool, and cannot: the previous
+		// attempt released the worker, so the record names none (#957).
 		return actor, nil
 	}
 	// Decided before marking: once SUSPENDING is committed, the loaded status
