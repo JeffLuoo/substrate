@@ -48,12 +48,20 @@
 # Optional `flags` is a list of arbitrary strings appended to runner.py's
 # argv; runner.py forwards them to locust verbatim.
 #
-# `--ladder users:duration[:trace_probability],...` in `flags` turns the test
-# into a sequence of steps in one run (benchmarking/locust/shapes/ladder_shape.py).
-# The shape then owns the load and the end of the run, so runner.py stops
-# forwarding `-t` and `users` becomes the count before the first tick only.
-# Keep `duration` at the total of the steps: the orchestrator sizes the Job
-# timeout from it.
+# `file` is one path, or a comma-separated list of paths that locust reads as
+# one test. Give the test first, then each load shape. A shape changes the
+# load while the run continues; the shapes are in benchmarking/locust/shapes/.
+#
+# `--ladder users:duration[:trace_probability],...` with
+# shapes/ladder_shape.py in `file` makes a sweep one run. The shape owns the
+# load and the end of the run, thus locust ignores `-t` and `users` is the
+# count before the first tick only. Keep `duration` at the total of the steps:
+# the orchestrator sizes the Job timeout from it.
+#
+# A step of the ladder that gives a trace probability changes the sample rate
+# when the step starts, and the new rate stays until another step changes it.
+# `--trace-probability` in `flags` is the rate before the first such step.
+# Thus a ladder with no probability in any step keeps the rate of the flag.
 #
 # ---- type: nighthawk-ingress --------------------------------------------------------
 #
@@ -124,7 +132,7 @@ tests:
     type: locust
     description: "Observability S0: the telemetry of an idle control plane, 5 minutes"
     targetCluster: dev
-    file: /app/tests/glutton.py
+    file: /app/tests/glutton.py,/app/shapes/ladder_shape.py
     duration: 5m
     users: 0
     workerCount: 10
@@ -140,7 +148,7 @@ tests:
     type: locust
     description: "Observability S1: user sweep 5 -> 10 -> 15, 3 minutes for each step"
     targetCluster: dev
-    file: /app/tests/glutton.py
+    file: /app/tests/glutton.py,/app/shapes/ladder_shape.py
     duration: 9m
     users: 5
     workerCount: 10
@@ -157,7 +165,7 @@ tests:
     type: locust
     description: "Observability S2: sample rate 0 -> 0.1 -> 1.0 at 10 users, 3 minutes for each step"
     targetCluster: dev
-    file: /app/tests/glutton.py
+    file: /app/tests/glutton.py,/app/shapes/ladder_shape.py
     duration: 9m
     users: 10
     workerCount: 10
@@ -172,7 +180,7 @@ tests:
     type: locust
     description: "Observability S3: 12 users for 10 minutes, 80% of the S1 maximum"
     targetCluster: dev
-    file: /app/tests/glutton.py
+    file: /app/tests/glutton.py,/app/shapes/ladder_shape.py
     duration: 10m
     users: 12
     workerCount: 10

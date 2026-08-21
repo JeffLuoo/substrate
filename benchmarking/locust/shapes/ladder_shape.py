@@ -26,10 +26,18 @@ of `users:duration[:trace_probability]`:
     --ladder 15:3m:0,15:3m:0.1,15:3m:1 the sample-rate sweep, S2
     --ladder 0:5m                      the idle floor, S0
 
-The shape controls the duration of the run, thus runner.py gives locust no
-`-t` when this flag is present, and the run ends with the last step.
+Name this file in the `file` of the test, after the test itself:
 
-A step that names a trace probability changes the sample rate as it starts.
+    file: /app/tests/glutton.py,/app/shapes/ladder_shape.py
+
+The shape controls the duration of the run. locust ignores `-t` when a shape
+is present, thus the run ends with the last step.
+
+A step that names a trace probability changes the sample rate as it starts,
+and the new rate stays until another step changes it. `--trace-probability`
+gives the rate before the first step that names one. Thus a ladder with no
+probability in any step keeps the rate of that flag from start to end.
+
 The value goes to the parsed options of the master, thus:
 
   * A Python user class reads it through the sampler of common.trace.
