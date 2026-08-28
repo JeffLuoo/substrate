@@ -30,6 +30,9 @@ export KO_DOCKER_REPO="${KO_DOCKER_REPO:-localhost:5001}"
 export KO_DEFAULTPLATFORMS="linux/${goarch}"
 # install resolved manifests using Kustomize overlay for local Kind cluster
 export ATE_INSTALL_KIND="true"
+# send the control plane to the in-cluster collector that this install applies.
+# An explicit --observability still wins, because the flag comes after this.
+export ATE_OBSERVABILITY="${ATE_OBSERVABILITY:-kind}"
 # use default bucket name for local deployment
 export BUCKET_NAME="ate-snapshots"
 # target the local kind cluster's context (mirrors run-microvm-demo-kind.sh) so

@@ -51,6 +51,10 @@ source "${ROOT}"/hack/install-demo-autoscaled-workerpool.sh
 # behind --experimental-additional-egress-extproc-service.
 source "${ROOT}"/hack/experimental-additional-egress-extproc.sh
 
+# Include the --observability mode, which selects the collector of the control
+# plane, or no collector at all.
+source "${ROOT}"/hack/observability.sh
+
 # ANSI color codes for prettier output
 COLOR_CYAN='\033[1;36m'
 COLOR_RESET='\033[0m'
@@ -73,7 +77,12 @@ function usage() {
   echo "  --atenet-router=envoy|agentgateway     Select the ingress and egress dataplane (default: envoy)"
   echo "  --podcert-workers-per-signer N         Concurrent workers per podcertificate-controller signer (default: 1)"
   echo "  --rollout-timeout DURATION             Per-workload readiness wait timeout, kubectl-style Go duration (default: 60s)"
-  echo "  --otlp-endpoint URL                    Send all control plane telemetry to URL, not to the cluster default (see benchmarking/telemetry/README.md)"
+  echo "  --observability MODE                   Where the control plane sends its telemetry: none | otlp | gke | kind."
+  echo "                                         none exports nothing and is the default; each component still serves /metrics."
+  echo "                                         otlp needs --otlp-endpoint. gke needs the GKE managed OTel addon."
+  echo "                                         kind is the in-cluster collector of a kind install, and its default."
+  echo "  --otlp-endpoint URL                    The collector of --observability=otlp, which this flag also selects"
+  echo "                                         (see benchmarking/telemetry/README.md)"
   echo ""
   echo "Experiments:"
   echo ""
@@ -286,58 +295,17 @@ apply_atenet_egress() {
 }
 
 # Apply the ate-otel-config ConfigMap that every control plane component reads
-# via envFrom. The full install gets it through render_ate_system_manifests, but
-# the targeted single-component redeploys below apply raw manifests with no
-# Kustomize, so they have to select the environment's copy themselves. Applying
-# the base file unconditionally would overwrite a kind cluster's ConfigMap with
-# the GKE endpoint and silently break telemetry for every component at once.
+# via envFrom, in the form that the --observability mode selects; see
+# hack/observability.sh. The preflight comes first, thus a mode that names a
+# collector which the cluster does not have stops the install here, ahead of the
+# first workload.
+#
+# No bundle carries a copy of this ConfigMap. Thus this is the one apply of it,
+# and the install needs no patch after the bundle and no restart of the
+# workloads that read it.
 apply_otel_config() {
-  if [[ "${ATE_INSTALL_KIND:-false}" == "true" ]]; then
-    run_kubectl apply -f manifests/ate-install/kind/ate-otel-config.yaml
-  else
-    run_kubectl apply -f manifests/ate-install/ate-otel-config.yaml
-  fi
-}
-
-# --otlp-endpoint sends all control plane telemetry to a different collector for
-# the duration of a measurement. One patch is sufficient: each component reads
-# this ConfigMap through envFrom, and ate-controller copies the values to the
-# ateom worker pods that it creates. See benchmarking/telemetry/README.md.
-#
-# Call this AFTER every apply. The ate-system bundle contains its own copy of
-# ate-otel-config, thus an apply of the bundle replaces a patch that came
-# before it, and the endpoint returns to the cluster default with no error
-# message.
-#
-# A change to a ConfigMap starts no rollout, because the pod template stays the
-# same. Thus restart the consumers that read it. Do the restart only when the
-# value changes: a restart during the rollout of the bundle makes the two
-# rollouts compete, and `kubectl rollout status` can then exceed its timeout.
-# An absent workload is not an error, because a deploy of one component has
-# only that component.
-apply_otel_endpoint_override() {
-  if [[ -z "${ATE_OTLP_ENDPOINT:-}" ]]; then
-    return 0
-  fi
-
-  local current=""
-  current="$(run_kubectl -n ate-system get configmap ate-otel-config \
-    -o jsonpath='{.data.OTEL_EXPORTER_OTLP_ENDPOINT}' 2>/dev/null || true)"
-  if [[ "${current}" == "${ATE_OTLP_ENDPOINT}" ]]; then
-    return 0
-  fi
-
-  echo "Overriding OTEL_EXPORTER_OTLP_ENDPOINT with ${ATE_OTLP_ENDPOINT}"
-  run_kubectl -n ate-system patch configmap ate-otel-config --type=merge \
-    -p "{\"data\":{\"OTEL_EXPORTER_OTLP_ENDPOINT\":\"${ATE_OTLP_ENDPOINT}\"}}"
-
-  local workload
-  for workload in deployment/ate-api-server deployment/ate-controller \
-                  deployment/atenet-router daemonset/atelet; do
-    if run_kubectl -n ate-system get "${workload}" >/dev/null 2>&1; then
-      run_kubectl -n ate-system rollout restart "${workload}"
-    fi
-  done
+  preflight_observability
+  render_otel_config | run_kubectl apply -f -
 }
 
 # Extract a CA pool secret's RootCertificateDER and emit it as a PEM certificate.
@@ -591,9 +559,6 @@ deploy_ate_system() {
   run_kubectl rollout status deployment/atenet-router -n ate-system --timeout="$(rollout_timeout)"
   run_kubectl rollout status deployment/atenet-egress -n ate-system --timeout="$(rollout_timeout)"
   run_kubectl rollout status daemonset/atelet -n ate-system --timeout="$(rollout_timeout)"
-
-  # After the bundle, which carries its own copy of ate-otel-config.
-  apply_otel_endpoint_override
 }
 
 # Ensure secrets and configmaps required by ate-apiserver
@@ -625,7 +590,6 @@ deploy_ate_apiserver() {
 
   ensure_apiserver_prerequisites
   apply_otel_config
-  apply_otel_endpoint_override
 
   run_ko apply -f manifests/ate-install/ate-api-server.yaml
   run_kubectl rollout status deployment/ate-api-server -n ate-system --timeout="$(rollout_timeout)"
@@ -640,7 +604,6 @@ deploy_atelet() {
     && run_kubectl wait --for=jsonpath='{.status.phase}'=Active namespace/ate-system --timeout=60s
 
   apply_otel_config
-  apply_otel_endpoint_override
 
   local manifest=""
   if [[ "${ATE_INSTALL_KIND:-false}" == "true" ]]; then
@@ -663,7 +626,6 @@ deploy_atenet() {
     && run_kubectl wait --for=jsonpath='{.status.phase}'=Active namespace/ate-system --timeout=60s
 
   apply_otel_config
-  apply_otel_endpoint_override
 
   local router_manifest=""
   router_manifest="$(render_atenet_router_manifest)"
@@ -786,6 +748,10 @@ delete_ate_system() {
     -f manifests/ate-install/components/agentgateway/configmap.yaml
   run_kubectl delete --ignore-not-found -f manifests/ate-install/postgres.yaml
   run_kubectl delete --ignore-not-found -f manifests/ate-install/generated
+  # By name, and not by manifest: no bundle above holds the ate-otel-config
+  # ConfigMap, because the file that supplies it changes with --observability,
+  # and the mode of the delete can differ from the mode of the install.
+  run_kubectl delete --ignore-not-found -n ate-system configmap ate-otel-config
 }
 
 delete_atenet() {
@@ -938,6 +904,14 @@ for ((i = 0; i < ${#prescan_args[@]}; i++)); do
       ATE_OTLP_ENDPOINT="${prescan_args[$((i + 1))]}"
       ;;
     --otlp-endpoint=*) ATE_OTLP_ENDPOINT="${prescan_args[i]#*=}" ;;
+    --observability)
+      if (( i + 1 >= ${#prescan_args[@]} )); then
+        echo "Error: --observability requires none, otlp, gke, or kind" >&2
+        exit 1
+      fi
+      ATE_OBSERVABILITY="${prescan_args[$((i + 1))]}"
+      ;;
+    --observability=*) ATE_OBSERVABILITY="${prescan_args[i]#*=}" ;;
     --setup-csi)
       SETUP_CSI=true
       ;;
@@ -953,6 +927,7 @@ case "${BENCHMARK_SANDBOX_CLASS}" in
 esac
 podcert_workers_per_signer >/dev/null
 rollout_timeout >/dev/null
+validate_observability_flags
 
 while [[ "$#" -gt 0 ]]; do
   # Run ${demo}_cmdline if it exists. If it returns 0, then we successfully
@@ -1031,6 +1006,8 @@ while [[ "$#" -gt 0 ]]; do
     --benchmark-actor-memory=*) ;;
     --otlp-endpoint) shift ;;
     --otlp-endpoint=*) ;;
+    --observability) shift ;;
+    --observability=*) ;;
 
     --create-jwt-authority-pool-secret) create_jwt_authority_pool_secret ;;
     --create-actor-id-ca-pool-secret) create_actor_id_ca_pool_secret ;;
