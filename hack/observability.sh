@@ -32,6 +32,11 @@
 #
 # Each mode supplies the ate-otel-config ConfigMap from a different file, and
 # preflight_observability tests the mode before the install applies anything.
+#
+# The mode of a cluster is state, and not only a flag. The install writes the
+# mode on the ConfigMap, and reads it back when no flag gives one. Thus a deploy
+# of one component keeps the collector of the cluster, and a change of mode
+# restarts the workloads that read the ConfigMap.
 
 OTEL_CONFIG_NONE="manifests/ate-install/otel/none/ate-otel-config.yaml"
 OTEL_CONFIG_GKE="manifests/ate-install/otel/gke/ate-otel-config.yaml"
@@ -41,37 +46,128 @@ OTEL_CONFIG_KIND="manifests/ate-install/otel/kind/ate-otel-config.yaml"
 # both; the endpoint in ${OTEL_CONFIG_GKE} names both.
 GKE_OTEL_NAMESPACE="gke-managed-otel"
 
-# ate_observability echoes the selected mode, and stops the install if the mode
-# is not a known one. With no --observability, --otlp-endpoint gives mode otlp,
-# a kind install gives mode kind, and each other install gives mode none.
-ate_observability() {
-  local mode="${ATE_OBSERVABILITY:-}"
-  if [[ -z "${mode}" ]]; then
+# The ate-otel-config ConfigMap of the cluster, read one time. The read tells a
+# deploy of one component which collector the cluster already has.
+ATE_OBSERVABILITY_CLUSTER_READ=false
+ATE_OBSERVABILITY_CLUSTER_MODE=""
+ATE_OBSERVABILITY_CLUSTER_ENDPOINT=""
+
+# endpoint_in_file echoes the endpoint that a ConfigMap manifest names.
+endpoint_in_file() {
+  sed -n 's|^  OTEL_EXPORTER_OTLP_ENDPOINT: *||p' "$1" | tr -d '"'
+}
+
+# mode_of_endpoint echoes the mode that an endpoint belongs to. It is for a
+# ConfigMap that carries no mode annotation, which is the ConfigMap of an
+# install that came before the modes: the endpoint is the only evidence there,
+# and without this the next deploy of one component would put the default over a
+# collector that works.
+mode_of_endpoint() {
+  local endpoint="$1"
+  if [[ -z "${endpoint}" ]]; then
+    echo "none"
+  elif [[ "${endpoint}" == "$(endpoint_in_file "${OTEL_CONFIG_GKE}")" ]]; then
+    echo "gke"
+  elif [[ "${endpoint}" == "$(endpoint_in_file "${OTEL_CONFIG_KIND}")" ]]; then
+    echo "kind"
+  else
+    echo "otlp"
+  fi
+}
+
+# read_cluster_observability reads the mode and the endpoint of the
+# ate-otel-config ConfigMap in the cluster. Both stay empty when the cluster has
+# no such ConfigMap, and when there is no cluster to ask.
+read_cluster_observability() {
+  if [[ "${ATE_OBSERVABILITY_CLUSTER_READ}" == "true" ]]; then
+    return 0
+  fi
+  ATE_OBSERVABILITY_CLUSTER_READ=true
+
+  local raw=""
+  raw="$(run_kubectl -n ate-system get configmap ate-otel-config \
+    -o jsonpath='{.metadata.annotations.ate\.dev/observability-mode}|{.data.OTEL_EXPORTER_OTLP_ENDPOINT}' \
+    2>/dev/null || true)"
+  # The separator is present for each ConfigMap that exists, and absent for a
+  # read that failed, thus it tells the two apart.
+  if [[ "${raw}" != *"|"* ]]; then
+    return 0
+  fi
+  ATE_OBSERVABILITY_CLUSTER_MODE="${raw%%|*}"
+  ATE_OBSERVABILITY_CLUSTER_ENDPOINT="${raw#*|}"
+  if [[ -z "${ATE_OBSERVABILITY_CLUSTER_MODE}" ]]; then
+    ATE_OBSERVABILITY_CLUSTER_MODE="$(mode_of_endpoint "${ATE_OBSERVABILITY_CLUSTER_ENDPOINT}")"
+  fi
+}
+
+# resolve_observability decides the mode, and stops the install if the mode is
+# not a known one. The order is:
+#
+#   1. --observability, or ATE_OBSERVABILITY.
+#   2. --otlp-endpoint, which gives mode otlp.
+#   3. The mode of the cluster, thus a deploy of one component does not change
+#      the collector that the cluster has.
+#   4. Mode kind on a kind install, and mode none on each other install.
+#
+# Call it in the shell of the install, and not in a subshell: for mode otlp it
+# also takes the address from the cluster, which no manifest holds.
+# ate_observability echoes the result.
+resolve_observability() {
+  local source="the --observability flag"
+
+  if [[ -z "${ATE_OBSERVABILITY:-}" ]]; then
     if [[ -n "${ATE_OTLP_ENDPOINT:-}" ]]; then
-      mode="otlp"
-    elif [[ "${ATE_INSTALL_KIND:-false}" == "true" ]]; then
-      mode="kind"
+      ATE_OBSERVABILITY="otlp"
+      source="the --otlp-endpoint flag"
     else
-      mode="none"
+      read_cluster_observability
+      if [[ -n "${ATE_OBSERVABILITY_CLUSTER_MODE}" ]]; then
+        ATE_OBSERVABILITY="${ATE_OBSERVABILITY_CLUSTER_MODE}"
+        ATE_OTLP_ENDPOINT="${ATE_OBSERVABILITY_CLUSTER_ENDPOINT}"
+        source="the cluster"
+        # Only mode otlp keeps its address in the ConfigMap. For each other
+        # mode the manifest holds it, and the flag must stay empty, because
+        # validate_observability_flags rejects the two together.
+        if [[ "${ATE_OBSERVABILITY}" != "otlp" ]]; then
+          ATE_OTLP_ENDPOINT=""
+        fi
+      elif [[ "${ATE_INSTALL_KIND:-false}" == "true" ]]; then
+        ATE_OBSERVABILITY="kind"
+        source="the kind install"
+      else
+        ATE_OBSERVABILITY="none"
+        source="the default"
+      fi
     fi
   fi
 
-  case "${mode}" in
-    none | otlp | gke | kind)
-      echo "${mode}"
-      ;;
+  case "${ATE_OBSERVABILITY}" in
+    none | otlp | gke | kind) ;;
     *)
-      echo "Error: --observability must be none, otlp, gke, or kind, got '${mode}'" >&2
+      echo "Error: --observability must be none, otlp, gke, or kind, got '${ATE_OBSERVABILITY}'" >&2
       exit 1
       ;;
   esac
+  # The first resolution decides the source. A later call has a mode already,
+  # thus it must not report that mode as one that a flag gave.
+  if [[ -z "${ATE_OBSERVABILITY_SOURCE:-}" ]]; then
+    ATE_OBSERVABILITY_SOURCE="${source}"
+  fi
+}
+
+# ate_observability echoes the mode. It resolves the mode each time, because a
+# resolution that a subshell made does not reach the shell of the install.
+ate_observability() {
+  resolve_observability
+  echo "${ATE_OBSERVABILITY}"
 }
 
 # validate_observability_flags rejects a combination of flags that no install
 # can satisfy. Call it in the pre-scan, ahead of the first apply.
 validate_observability_flags() {
   local mode
-  mode="$(ate_observability)"
+  resolve_observability
+  mode="${ATE_OBSERVABILITY}"
 
   if [[ "${mode}" == "otlp" && -z "${ATE_OTLP_ENDPOINT:-}" ]]; then
     echo "Error: --observability=otlp needs the address of a collector." >&2
@@ -87,7 +183,10 @@ validate_observability_flags() {
     exit 1
   fi
 
-  if [[ "${mode}" == "kind" && "${ATE_INSTALL_KIND:-false}" != "true" ]]; then
+  # Only for a mode that a flag gives. A kind cluster that keeps mode kind is
+  # correct, and hack/install-ate.sh can deploy to it with no flag.
+  if [[ "${mode}" == "kind" && "${ATE_INSTALL_KIND:-false}" != "true" \
+    && "${ATE_OBSERVABILITY_SOURCE}" != "the cluster" ]]; then
     echo "Error: --observability=kind needs a kind install, because the collector" >&2
     echo "  of that mode is the one that hack/install-ate-kind.sh applies." >&2
     echo "  Use hack/install-ate-kind.sh, or --observability=otlp with the" >&2
@@ -128,7 +227,8 @@ otel_config_file() {
 
 # render_otel_config echoes the ate-otel-config ConfigMap of the selected mode.
 # The endpoint is in the manifest before the apply, thus the install needs no
-# patch after it, and no restart of the workloads that read the ConfigMap.
+# patch after it. Mode otlp takes the file of mode none, thus it replaces the
+# endpoint and the mode annotation in it.
 render_otel_config() {
   local file
   file="$(otel_config_file)"
@@ -136,7 +236,8 @@ render_otel_config() {
     cat "${file}"
     return
   fi
-  sed "s|^  OTEL_EXPORTER_OTLP_ENDPOINT:.*|  OTEL_EXPORTER_OTLP_ENDPOINT: ${ATE_OTLP_ENDPOINT}|" \
+  sed -e "s|^  OTEL_EXPORTER_OTLP_ENDPOINT:.*|  OTEL_EXPORTER_OTLP_ENDPOINT: ${ATE_OTLP_ENDPOINT}|" \
+    -e "s|^    ate.dev/observability-mode:.*|    ate.dev/observability-mode: otlp|" \
     "${file}"
 }
 
@@ -144,9 +245,7 @@ render_otel_config() {
 # in mode none. It reads the rendered manifest, thus the manifest stays the one
 # source of the value.
 rendered_otlp_endpoint() {
-  render_otel_config \
-    | sed -n 's|^  OTEL_EXPORTER_OTLP_ENDPOINT: *||p' \
-    | tr -d '"'
+  render_otel_config | sed -n 's|^  OTEL_EXPORTER_OTLP_ENDPOINT: *||p' | tr -d '"'
 }
 
 # otlp_endpoint_service echoes "namespace service" for an endpoint that names a
@@ -205,13 +304,14 @@ preflight_observability() {
   fi
   ATE_OBSERVABILITY_PREFLIGHT_DONE=true
 
-  local mode endpoint
+  local mode endpoint from
   mode="$(ate_observability)"
   endpoint="$(rendered_otlp_endpoint)"
+  from=" (from ${ATE_OBSERVABILITY_SOURCE:-the default})"
 
   case "${mode}" in
     none)
-      echo "Observability: mode none. The control plane exports no telemetry."
+      echo "Observability: mode none${from}. The control plane exports no telemetry."
       echo "  Each component still serves its own /metrics endpoint."
       if run_kubectl get namespace "${GKE_OTEL_NAMESPACE}" >/dev/null 2>&1; then
         echo "  The namespace ${GKE_OTEL_NAMESPACE} is present. To use that collector,"
@@ -219,14 +319,14 @@ preflight_observability() {
       fi
       ;;
     gke)
-      echo "Observability: mode gke, endpoint ${endpoint}"
+      echo "Observability: mode gke${from}, endpoint ${endpoint}"
       check_otlp_endpoint_reachable "${endpoint}" \
         "  Enable the managed OTel addon on the cluster, or install with
   --observability=otlp and the address of your own collector, or with
   --observability=none for no telemetry export."
       ;;
     otlp)
-      echo "Observability: mode otlp, endpoint ${endpoint}"
+      echo "Observability: mode otlp${from}, endpoint ${endpoint}"
       check_otlp_endpoint_reachable "${endpoint}" \
         "  Install the collector first, correct --otlp-endpoint, or install with
   --observability=none for no telemetry export."
@@ -234,7 +334,53 @@ preflight_observability() {
     kind)
       # No test of the Service: the collector is in the same bundle as the
       # components, thus it does not exist before this install applies it.
-      echo "Observability: mode kind, endpoint ${endpoint}"
+      echo "Observability: mode kind${from}, endpoint ${endpoint}"
       ;;
   esac
+}
+
+# ATE_OTEL_CONFIG_CHANGED records that this install gives the cluster a
+# different collector than the one it had. restart_otel_consumers reads it.
+ATE_OTEL_CONFIG_CHANGED=false
+
+# note_otel_config_change compares the ConfigMap of this install with the one in
+# the cluster. Nothing to compare on a first install, thus no change: the
+# workloads that come after it read the new ConfigMap when they start.
+note_otel_config_change() {
+  read_cluster_observability
+  if [[ -z "${ATE_OBSERVABILITY_CLUSTER_MODE}" ]]; then
+    return 0
+  fi
+  if [[ "$(ate_observability)" != "${ATE_OBSERVABILITY_CLUSTER_MODE}" ]] \
+    || [[ "$(rendered_otlp_endpoint)" != "${ATE_OBSERVABILITY_CLUSTER_ENDPOINT}" ]]; then
+    ATE_OTEL_CONFIG_CHANGED=true
+  fi
+}
+
+# restart_otel_consumers restarts the workloads that read ate-otel-config, but
+# only when the collector changed. They read it with envFrom, thus each one
+# takes a new endpoint at the start of a pod, and a new ConfigMap on its own
+# starts no pod: the pod template stays the same, thus the apply above starts no
+# rollout and each running pod keeps the collector of the install before it.
+#
+# Call this at the end of a deploy path, after the waits for the rollouts. A
+# restart during the rollout of the bundle makes the two rollouts compete, and
+# `kubectl rollout status` can then exceed its timeout. An absent workload is
+# not an error, because a deploy of one component has only that component.
+restart_otel_consumers() {
+  if [[ "${ATE_OTEL_CONFIG_CHANGED}" != "true" ]]; then
+    return 0
+  fi
+  ATE_OTEL_CONFIG_CHANGED=false
+
+  echo "The collector changed. Restarting the workloads that read ate-otel-config."
+  local workload
+  for workload in deployment/ate-api-server deployment/ate-controller \
+    deployment/atenet-router daemonset/atelet; do
+    if run_kubectl -n ate-system get "${workload}" >/dev/null 2>&1; then
+      run_kubectl -n ate-system rollout restart "${workload}"
+    fi
+  done
+  echo "  ate-controller rolls each WorkerPool when it restarts, thus the running"
+  echo "  workers, and the actors on them, are replaced."
 }

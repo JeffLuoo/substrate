@@ -295,7 +295,20 @@ The install tests the mode before it applies a workload. A mode that names a col
 
 Each mode supplies the `ate-otel-config` ConfigMap from its own file under [`manifests/ate-install/otel/`](../manifests/ate-install/otel), in the directory that carries the name of the mode. No bundle holds a copy of that ConfigMap, thus the mode of the install is the mode that the cluster keeps.
 
-To change the collector of a cluster, install again with a different mode. A change to the ConfigMap on its own does not restart the pods that read it, because the pod template stays the same; after such a change, do `kubectl rollout restart` on the affected workloads.
+### The mode of a cluster
+
+The mode is state of the cluster, and not only a flag. The install writes it on the ConfigMap, as the `ate.dev/observability-mode` annotation, and reads it back when the command line gives no mode:
+
+```bash
+./hack/install-ate.sh --deploy-ate-system --observability=gke   # the cluster is now in mode gke
+./hack/install-ate.sh --deploy-atelet                           # keeps mode gke, and reports it
+```
+
+Thus a deploy of one component does not put the default over the collector of the cluster. The report of each install names the mode and where it came from. A ConfigMap from an install that came before the modes carries no annotation; the install reads the mode from the endpoint in it, thus that cluster also keeps its collector.
+
+To change the collector, install again with a different mode. A change of the ConfigMap on its own does not restart the pods that read it, because the pod template stays the same. Thus the install restarts `ate-api-server`, `ate-controller`, `atenet-router`, and `atelet` when, and only when, the collector changed.
+
+> A restart of `ate-controller` rolls each WorkerPool Deployment, thus a change of mode replaces the running workers together with the actors on them. Change the mode when that cost is acceptable.
 
 ### The backends
 

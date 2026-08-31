@@ -24,41 +24,86 @@ set -o errexit -o nounset -o pipefail
 ROOT="$(git rev-parse --show-toplevel)"
 cd "${ROOT}"
 
-# The objects that the run_kubectl below reports as present. Each test sets it.
+# The state of the cluster that the run_kubectl below reports.
+#
+#   FAKE_OBJECTS   one "kind/name" or "kind/name.namespace" for each object
+#   FAKE_CONFIGMAP "<mode>|<endpoint>" of the ate-otel-config ConfigMap, and
+#                  empty when the cluster has no such ConfigMap
+#   FAKE_RESTARTS  the workloads that the test under way restarted
 FAKE_OBJECTS=""
+FAKE_CONFIGMAP=""
+FAKE_RESTARTS=""
 
-# run_kubectl answers `get <kind> <name>` and `get <kind> <name> --namespace ns`
-# from FAKE_OBJECTS, which holds one "kind/name" or "kind/name.namespace" for
-# each object. Each other command is an error, because no function under test
-# is permitted to change the cluster.
+# run_kubectl answers a get from the state above, and records a rollout restart.
+# Each other command is an error, because no function under test is permitted to
+# change the cluster in another way.
 run_kubectl() {
-  local kind="" name="" namespace="" key=""
-  if [[ "${1:-}" != "get" ]]; then
-    echo "run_kubectl: the test permits get only, got: $*" >&2
-    return 1
-  fi
-  kind="$2"
-  name="$3"
-  shift 3
-  while [[ "$#" -gt 0 ]]; do
-    case "$1" in
-      --namespace)
-        namespace="$2"
-        shift
+  local args=("$@") positional=() namespace="" i=0
+  while ((i < ${#args[@]})); do
+    case "${args[i]}" in
+      -n | --namespace)
+        namespace="${args[i + 1]}"
+        ((i += 2))
+        continue
         ;;
-      --namespace=*) namespace="${1#*=}" ;;
+      -o)
+        # The output format has no effect here: a get of the ConfigMap always
+        # answers with the jsonpath that read_cluster_observability asks for.
+        ((i += 2))
+        continue
+        ;;
+      --namespace=* | -o* | --context=*) ;;
+      *) positional+=("${args[i]}") ;;
     esac
-    shift
+    ((i++))
   done
 
-  key="${kind}/${name}"
-  if [[ -n "${namespace}" ]]; then
-    key="${key}.${namespace}"
-  fi
-  [[ " ${FAKE_OBJECTS} " == *" ${key} "* ]]
+  case "${positional[0]:-}" in
+    get)
+      local kind="${positional[1]:-}" name="${positional[2]:-}" key=""
+      if [[ "${kind}" == "configmap" && "${name}" == "ate-otel-config" ]]; then
+        [[ -n "${FAKE_CONFIGMAP}" ]] || return 1
+        echo "${FAKE_CONFIGMAP}"
+        return 0
+      fi
+      # A get takes "<kind> <name>", and also the "<kind>/<name>" of a rollout.
+      key="${kind}"
+      if [[ -n "${name}" ]]; then
+        key="${key}/${name}"
+      fi
+      if [[ -n "${namespace}" ]]; then
+        key="${key}.${namespace}"
+      fi
+      [[ " ${FAKE_OBJECTS} " == *" ${key} "* ]]
+      ;;
+    rollout)
+      FAKE_RESTARTS="${FAKE_RESTARTS}${positional[2]:-} "
+      ;;
+    *)
+      echo "run_kubectl: the test does not permit: $*" >&2
+      return 1
+      ;;
+  esac
 }
 
 source "${ROOT}"/hack/observability.sh
+
+# reset_state puts back the state that one install holds, thus each test below
+# starts from an install that has done nothing yet.
+reset_state() {
+  ATE_OBSERVABILITY=""
+  ATE_OTLP_ENDPOINT=""
+  ATE_INSTALL_KIND=false
+  ATE_OBSERVABILITY_SOURCE=""
+  ATE_OBSERVABILITY_PREFLIGHT_DONE=false
+  ATE_OBSERVABILITY_CLUSTER_READ=false
+  ATE_OBSERVABILITY_CLUSTER_MODE=""
+  ATE_OBSERVABILITY_CLUSTER_ENDPOINT=""
+  ATE_OTEL_CONFIG_CHANGED=false
+  FAKE_OBJECTS=""
+  FAKE_CONFIGMAP=""
+  FAKE_RESTARTS=""
+}
 
 failures=0
 
@@ -97,6 +142,7 @@ expect_error() {
 }
 
 # The mode, with and without the flag.
+reset_state
 ATE_OBSERVABILITY="" ATE_OTLP_ENDPOINT="" ATE_INSTALL_KIND=false
 expect_eq "default mode is none" "none" "$(ate_observability)"
 
@@ -113,6 +159,7 @@ ATE_OBSERVABILITY="prometheus"
 expect_error "an unknown mode is an error" ate_observability
 
 # The tests of the flags.
+reset_state
 ATE_OBSERVABILITY="otlp" ATE_OTLP_ENDPOINT=""
 expect_error "mode otlp with no endpoint is an error" validate_observability_flags
 
@@ -138,6 +185,7 @@ ATE_OTLP_ENDPOINT='http://collector.svc:4317;rm -rf /'
 expect_error "an endpoint with a shell character is an error" validate_observability_flags
 
 # The ConfigMap of each mode.
+reset_state
 ATE_OBSERVABILITY="none" ATE_OTLP_ENDPOINT="" ATE_INSTALL_KIND=false
 expect_eq "mode none names no collector" "" "$(rendered_otlp_endpoint)"
 expect_eq "mode none uses the file of mode none" \
@@ -162,6 +210,7 @@ expect_eq "the rendered ConfigMap keeps its name" \
   "  name: ate-otel-config" "$(render_otel_config | grep '^  name:')"
 
 # The Service of an endpoint.
+reset_state
 expect_eq "an endpoint of this cluster gives its Service" \
   "otel-system opentelemetry-collector" \
   "$(otlp_endpoint_service "http://opentelemetry-collector.otel-system.svc:4317")"
@@ -172,6 +221,7 @@ expect_eq "an address outside the cluster gives nothing" \
   "" "$(otlp_endpoint_service "https://otlp.example.com:443")"
 
 # The preflight.
+reset_state
 ATE_OBSERVABILITY="gke" ATE_OTLP_ENDPOINT="" ATE_INSTALL_KIND=false
 ATE_OBSERVABILITY_PREFLIGHT_DONE=false FAKE_OBJECTS=""
 expect_error "mode gke without the addon stops the install" preflight_observability
@@ -203,6 +253,81 @@ expect_ok "mode none tests nothing" preflight_observability
 ATE_OBSERVABILITY_PREFLIGHT_DONE=false
 preflight_observability >/dev/null
 expect_eq "the preflight reports one time" "" "$(preflight_observability)"
+
+# The mode of the cluster, which a deploy with no flag must keep.
+reset_state
+FAKE_CONFIGMAP="gke|http://opentelemetry-collector.gke-managed-otel.svc.cluster.local:4317"
+expect_eq "a deploy with no flag keeps the mode of the cluster" \
+  "gke" "$(ate_observability)"
+
+ATE_OBSERVABILITY="none"
+expect_eq "the flag wins over the mode of the cluster" "none" "$(ate_observability)"
+
+reset_state
+FAKE_CONFIGMAP="otlp|http://my-collector.my-ns.svc:4317"
+resolve_observability
+expect_eq "mode otlp of the cluster keeps its address" \
+  "http://my-collector.my-ns.svc:4317" "${ATE_OTLP_ENDPOINT}"
+expect_eq "the report names the cluster as the source" "the cluster" \
+  "${ATE_OBSERVABILITY_SOURCE}"
+
+reset_state
+FAKE_CONFIGMAP="kind|http://opentelemetry-collector.otel-system.svc:4317"
+expect_ok "a kind cluster keeps mode kind with no kind install" validate_observability_flags
+
+# A ConfigMap from an install that came before the modes carries no annotation.
+reset_state
+FAKE_CONFIGMAP="|http://opentelemetry-collector.gke-managed-otel.svc.cluster.local:4317"
+expect_eq "the endpoint of the GKE addon gives mode gke" "gke" "$(ate_observability)"
+
+reset_state
+FAKE_CONFIGMAP="|http://my-collector.my-ns.svc:4317"
+expect_eq "an endpoint of your own gives mode otlp" "otlp" "$(ate_observability)"
+
+reset_state
+FAKE_CONFIGMAP="|"
+expect_eq "an empty endpoint gives mode none" "none" "$(ate_observability)"
+
+reset_state
+ATE_OBSERVABILITY="otlp" ATE_OTLP_ENDPOINT="http://meter.benchmarking.svc:4317"
+expect_eq "mode otlp writes its own mode on the ConfigMap" \
+  "    ate.dev/observability-mode: otlp" \
+  "$(render_otel_config | grep 'observability-mode')"
+
+# The change of collector, and the restart that it needs.
+reset_state
+ATE_OBSERVABILITY="gke"
+note_otel_config_change
+expect_eq "a first install changes nothing" "false" "${ATE_OTEL_CONFIG_CHANGED}"
+
+reset_state
+ATE_OBSERVABILITY="gke"
+FAKE_CONFIGMAP="gke|http://opentelemetry-collector.gke-managed-otel.svc.cluster.local:4317"
+note_otel_config_change
+expect_eq "the same mode changes nothing" "false" "${ATE_OTEL_CONFIG_CHANGED}"
+restart_otel_consumers >/dev/null
+expect_eq "no change restarts nothing" "" "${FAKE_RESTARTS}"
+
+reset_state
+ATE_OBSERVABILITY="none"
+FAKE_CONFIGMAP="gke|http://opentelemetry-collector.gke-managed-otel.svc.cluster.local:4317"
+note_otel_config_change
+expect_eq "a different mode is a change" "true" "${ATE_OTEL_CONFIG_CHANGED}"
+
+reset_state
+ATE_OBSERVABILITY="otlp" ATE_OTLP_ENDPOINT="http://meter.benchmarking.svc:4317"
+FAKE_CONFIGMAP="otlp|http://my-collector.my-ns.svc:4317"
+note_otel_config_change
+expect_eq "a different endpoint of the same mode is a change" \
+  "true" "${ATE_OTEL_CONFIG_CHANGED}"
+
+reset_state
+ATE_OTEL_CONFIG_CHANGED=true
+FAKE_OBJECTS="deployment/ate-api-server.ate-system daemonset/atelet.ate-system"
+restart_otel_consumers >/dev/null
+expect_eq "a change restarts the workloads that exist" \
+  "deployment/ate-api-server daemonset/atelet " "${FAKE_RESTARTS}"
+expect_eq "the restart happens one time" "false" "${ATE_OTEL_CONFIG_CHANGED}"
 
 if ((failures > 0)); then
   echo "${failures} test(s) failed" >&2

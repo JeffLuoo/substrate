@@ -81,6 +81,7 @@ function usage() {
   echo "                                         none exports nothing and is the default; each component still serves /metrics."
   echo "                                         otlp needs --otlp-endpoint. gke needs the GKE managed OTel addon."
   echo "                                         kind is the in-cluster collector of a kind install, and its default."
+  echo "                                         With no flag, an install keeps the mode that the cluster has."
   echo "  --otlp-endpoint URL                    The collector of --observability=otlp, which this flag also selects"
   echo "                                         (see benchmarking/telemetry/README.md)"
   echo ""
@@ -301,10 +302,14 @@ apply_atenet_egress() {
 # first workload.
 #
 # No bundle carries a copy of this ConfigMap. Thus this is the one apply of it,
-# and the install needs no patch after the bundle and no restart of the
-# workloads that read it.
+# and the install needs no patch after the bundle.
+#
+# A deploy path that ends with running workloads must call
+# restart_otel_consumers after its waits for the rollouts: a change of collector
+# reaches a running pod at its next start only.
 apply_otel_config() {
   preflight_observability
+  note_otel_config_change
   render_otel_config | run_kubectl apply -f -
 }
 
@@ -559,6 +564,8 @@ deploy_ate_system() {
   run_kubectl rollout status deployment/atenet-router -n ate-system --timeout="$(rollout_timeout)"
   run_kubectl rollout status deployment/atenet-egress -n ate-system --timeout="$(rollout_timeout)"
   run_kubectl rollout status daemonset/atelet -n ate-system --timeout="$(rollout_timeout)"
+
+  restart_otel_consumers
 }
 
 # Ensure secrets and configmaps required by ate-apiserver
@@ -593,6 +600,8 @@ deploy_ate_apiserver() {
 
   run_ko apply -f manifests/ate-install/ate-api-server.yaml
   run_kubectl rollout status deployment/ate-api-server -n ate-system --timeout="$(rollout_timeout)"
+
+  restart_otel_consumers
 }
 
 deploy_atelet() {
@@ -615,6 +624,8 @@ deploy_atelet() {
   fi
   echo "${manifest}" | run_kubectl apply -f -
   run_kubectl rollout status daemonset/atelet -n ate-system --timeout="$(rollout_timeout)"
+
+  restart_otel_consumers
 }
 
 deploy_atenet() {
@@ -637,6 +648,8 @@ deploy_atenet() {
   run_kubectl rollout status deployment/atenet-router -n ate-system --timeout="$(rollout_timeout)"
   run_kubectl rollout status deployment/atenet-egress -n ate-system --timeout="$(rollout_timeout)"
   run_kubectl rollout status deployment/dns -n ate-system --timeout="$(rollout_timeout)"
+
+  restart_otel_consumers
 }
 
 # get_actor_state echoes the actor's state enum (e.g. ACTOR_STATE_SUSPENDED).

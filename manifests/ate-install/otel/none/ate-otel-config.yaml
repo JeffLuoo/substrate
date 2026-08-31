@@ -40,5 +40,11 @@ kind: ConfigMap
 metadata:
   name: ate-otel-config
   namespace: ate-system
+  annotations:
+    # The mode that applied this ConfigMap. The installer reads it back: a
+    # deploy of one component, with no --observability, keeps the mode that the
+    # cluster has, and does not put the default over it. For mode otlp, the
+    # installer writes otlp here, because that mode uses this file.
+    ate.dev/observability-mode: none
 data:
   OTEL_EXPORTER_OTLP_ENDPOINT: ""

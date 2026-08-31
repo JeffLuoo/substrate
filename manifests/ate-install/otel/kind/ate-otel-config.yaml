@@ -36,6 +36,9 @@ kind: ConfigMap
 metadata:
   name: ate-otel-config
   namespace: ate-system
+  annotations:
+    # The mode that applied this ConfigMap; read ../none/ate-otel-config.yaml.
+    ate.dev/observability-mode: kind
 data:
   OTEL_EXPORTER_OTLP_ENDPOINT: http://opentelemetry-collector.otel-system.svc:4317
   OTEL_METRIC_EXPORT_INTERVAL: "10000"
