@@ -346,15 +346,27 @@ ATE_OTEL_CONFIG_CHANGED=false
 # note_otel_config_change compares the ConfigMap of this install with the one in
 # the cluster. Nothing to compare on a first install, thus no change: the
 # workloads that come after it read the new ConfigMap when they start.
+#
+# It then takes the new values as the values of the cluster, because the caller
+# applies them. One command line can name more than one deploy target
+# (--deploy-atelet --deploy-atenet), and each target applies the ConfigMap. Thus
+# without this, each target after the first one would compare with the state
+# before the install, find the same change again, and restart the workloads a
+# second time. Each of those restarts rolls every WorkerPool.
 note_otel_config_change() {
+  local mode endpoint
   read_cluster_observability
-  if [[ -z "${ATE_OBSERVABILITY_CLUSTER_MODE}" ]]; then
-    return 0
-  fi
-  if [[ "$(ate_observability)" != "${ATE_OBSERVABILITY_CLUSTER_MODE}" ]] \
-    || [[ "$(rendered_otlp_endpoint)" != "${ATE_OBSERVABILITY_CLUSTER_ENDPOINT}" ]]; then
+  mode="$(ate_observability)"
+  endpoint="$(rendered_otlp_endpoint)"
+
+  if [[ -n "${ATE_OBSERVABILITY_CLUSTER_MODE}" ]] \
+    && { [[ "${mode}" != "${ATE_OBSERVABILITY_CLUSTER_MODE}" ]] \
+      || [[ "${endpoint}" != "${ATE_OBSERVABILITY_CLUSTER_ENDPOINT}" ]]; }; then
     ATE_OTEL_CONFIG_CHANGED=true
   fi
+
+  ATE_OBSERVABILITY_CLUSTER_MODE="${mode}"
+  ATE_OBSERVABILITY_CLUSTER_ENDPOINT="${endpoint}"
 }
 
 # restart_otel_consumers restarts the workloads that read ate-otel-config, but

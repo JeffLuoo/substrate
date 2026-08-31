@@ -321,6 +321,22 @@ note_otel_config_change
 expect_eq "a different endpoint of the same mode is a change" \
   "true" "${ATE_OTEL_CONFIG_CHANGED}"
 
+# One command line can name more than one deploy target, and each target applies
+# the ConfigMap. Only the first one changes the collector.
+reset_state
+ATE_OBSERVABILITY="gke"
+FAKE_OBJECTS="deployment/ate-api-server.ate-system"
+FAKE_CONFIGMAP="none|"
+note_otel_config_change
+restart_otel_consumers >/dev/null
+expect_eq "the first deploy target restarts the workloads" \
+  "deployment/ate-api-server " "${FAKE_RESTARTS}"
+note_otel_config_change
+expect_eq "a second deploy target finds no change" "false" "${ATE_OTEL_CONFIG_CHANGED}"
+restart_otel_consumers >/dev/null
+expect_eq "a second deploy target restarts nothing again" \
+  "deployment/ate-api-server " "${FAKE_RESTARTS}"
+
 reset_state
 ATE_OTEL_CONFIG_CHANGED=true
 FAKE_OBJECTS="deployment/ate-api-server.ate-system daemonset/atelet.ate-system"
