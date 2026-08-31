@@ -78,7 +78,7 @@ function usage() {
   echo "  --podcert-workers-per-signer N         Concurrent workers per podcertificate-controller signer (default: 1)"
   echo "  --rollout-timeout DURATION             Per-workload readiness wait timeout, kubectl-style Go duration (default: 60s)"
   echo "  --observability MODE                   Where the control plane sends its telemetry: none | otlp | gke | kind."
-  echo "                                         none exports nothing and is the default; each component still serves /metrics."
+  echo "                                         none exports nothing and is the default; ateapi, atelet and atenet-router keep /metrics."
   echo "                                         otlp needs --otlp-endpoint. gke needs the GKE managed OTel addon."
   echo "                                         kind is the in-cluster collector of a kind install, and its default."
   echo "                                         With no flag, an install keeps the mode that the cluster has."

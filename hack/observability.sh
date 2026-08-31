@@ -23,8 +23,10 @@
 # names one collector is correct on one type of cluster only, and it is wrong
 # with no message on each other type. The modes are:
 #
-#   none   No collector. The components export no telemetry, and each one still
-#          serves its own /metrics endpoint. This is the default.
+#   none   No collector. The components export no telemetry. ateapi, atelet,
+#          and atenet-router still serve their own /metrics endpoints, and
+#          ate-controller and the ateoms push only, thus they emit nothing.
+#          This is the default.
 #   otlp   The collector at --otlp-endpoint. Use this for a collector that you
 #          operate, and for a measurement (read benchmarking/telemetry).
 #   gke    The collector of the GKE managed OTel addon.
@@ -144,7 +146,13 @@ resolve_observability() {
   case "${ATE_OBSERVABILITY}" in
     none | otlp | gke | kind) ;;
     *)
-      echo "Error: --observability must be none, otlp, gke, or kind, got '${ATE_OBSERVABILITY}'" >&2
+      echo "Error: the mode must be none, otlp, gke, or kind, got '${ATE_OBSERVABILITY}'" >&2
+      echo "  from ${source}." >&2
+      if [[ "${source}" == "the cluster" ]]; then
+        echo "  The ate.dev/observability-mode annotation on the ate-otel-config" >&2
+        echo "  ConfigMap in ate-system holds that value. Give --observability to" >&2
+        echo "  replace it." >&2
+      fi
       exit 1
       ;;
   esac
@@ -312,7 +320,8 @@ preflight_observability() {
   case "${mode}" in
     none)
       echo "Observability: mode none${from}. The control plane exports no telemetry."
-      echo "  Each component still serves its own /metrics endpoint."
+      echo "  ateapi, atelet, and atenet-router still serve their own /metrics"
+      echo "  endpoints. ate-controller and the ateoms push only, thus they emit nothing."
       if run_kubectl get namespace "${GKE_OTEL_NAMESPACE}" >/dev/null 2>&1; then
         echo "  The namespace ${GKE_OTEL_NAMESPACE} is present. To use that collector,"
         echo "  install again with --observability=gke."

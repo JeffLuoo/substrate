@@ -158,6 +158,10 @@ expect_eq "the flag selects the mode" "gke" "$(ate_observability)"
 ATE_OBSERVABILITY="prometheus"
 expect_error "an unknown mode is an error" ate_observability
 
+reset_state
+FAKE_CONFIGMAP="prometheus|http://collector.otel-system.svc:4317"
+expect_error "an unknown mode on the ConfigMap is an error" ate_observability
+
 # The tests of the flags.
 reset_state
 ATE_OBSERVABILITY="otlp" ATE_OTLP_ENDPOINT=""

@@ -286,7 +286,7 @@ The telemetry stack is optional, because substrate must run on a cluster that ha
 
 | Mode | The control plane sends its telemetry to | Notes |
 |---|---|---|
-| `none` | nothing | The default. Each component still serves its own `/metrics` endpoint. |
+| `none` | nothing | The default. `ateapi`, `atelet`, and `atenet-router` still serve their own `/metrics` endpoints; `ate-controller` and the ateoms push only, thus they emit nothing. |
 | `otlp` | the collector of `--otlp-endpoint` | For a collector that you operate, and for a measurement (read [benchmarking/telemetry](../benchmarking/telemetry/README.md)). |
 | `gke` | the collector of the GKE managed OTel addon | The addon must be enabled on the cluster. |
 | `kind` | the in-cluster collector that the same install applies | The default of `hack/install-ate-kind.sh`. |

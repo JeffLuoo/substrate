@@ -138,9 +138,9 @@ curl -X POST -H "Host: my-counter-1.demo.actors.resources.substrate.ate.dev" -i 
    ./hack/install-ate.sh --deploy-ate-system
    ```
 
-   The telemetry stack is optional, and this install exports no telemetry. Each
-   component still serves its own `/metrics` endpoint. To send the control plane
-   to a collector, add one of these:
+   The telemetry stack is optional, and this install exports no telemetry.
+   `ateapi`, `atelet`, and `atenet-router` still serve their own `/metrics`
+   endpoints. To send the control plane to a collector, add one of these:
    ```bash
    # the collector of the GKE managed OTel addon, which the cluster must have
    ./hack/install-ate.sh --deploy-ate-system --observability=gke
