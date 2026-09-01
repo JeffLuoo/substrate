@@ -298,6 +298,26 @@ expect_eq "mode otlp writes its own mode on the ConfigMap" \
   "    ate.dev/observability-mode: otlp" \
   "$(render_otel_config | grep 'observability-mode')"
 
+# The exporter of each signal, which internal/serverboot reads.
+reset_state
+ATE_OBSERVABILITY="none"
+expect_eq "mode none turns the exporters off" \
+  '  OTEL_METRICS_EXPORTER: "none"   OTEL_TRACES_EXPORTER: "none"' \
+  "$(render_otel_config | grep '_EXPORTER:' | sort | tr '\n' ' ' | sed 's/ *$//')"
+
+ATE_OBSERVABILITY="otlp" ATE_OTLP_ENDPOINT="http://meter.benchmarking.svc:4317"
+expect_eq "mode otlp turns the exporters on" \
+  '  OTEL_METRICS_EXPORTER: "otlp"   OTEL_TRACES_EXPORTER: "otlp"' \
+  "$(render_otel_config | grep '_EXPORTER:' | sort | tr '\n' ' ' | sed 's/ *$//')"
+
+ATE_OBSERVABILITY="gke" ATE_OTLP_ENDPOINT=""
+expect_eq "mode gke leaves the exporters at their default" \
+  "" "$(render_otel_config | grep '_EXPORTER:' || true)"
+
+ATE_OBSERVABILITY="kind" ATE_INSTALL_KIND=true
+expect_eq "mode kind leaves the exporters at their default" \
+  "" "$(render_otel_config | grep '_EXPORTER:' || true)"
+
 # The change of collector, and the restart that it needs.
 reset_state
 ATE_OBSERVABILITY="gke"

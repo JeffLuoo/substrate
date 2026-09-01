@@ -291,6 +291,8 @@ The telemetry stack is optional, because substrate must run on a cluster that ha
 | `gke` | the collector of the GKE managed OTel addon | The addon must be enabled on the cluster. |
 | `kind` | the in-cluster collector that the same install applies | The default of `hack/install-ate-kind.sh`. |
 
+Mode `none` is quiet, and not only unconfigured: `internal/serverboot` builds no OTLP exporter when the standard `OTEL_TRACES_EXPORTER` / `OTEL_METRICS_EXPORTER` say `none`, when `OTEL_SDK_DISABLED` is true, or when the endpoint is empty. That last rule is the one that matters on a cluster with no collector: the OTel SDK reads an empty variable as an absent one and falls back to `localhost:4317`, thus each component would log a failed export once each tick, for its whole life. The tracer provider stays registered, thus the spans keep their IDs and the logs keep the `trace_id` that joins them.
+
 The install tests the mode before it applies a workload. A mode that names a collector which the cluster does not have stops the install with a message. Thus an absent dependency does not become a fault of the network: without this test, each component fails to find the collector one time each minute, and the telemetry stops with no message.
 
 Each mode supplies the `ate-otel-config` ConfigMap from its own file under [`manifests/ate-install/otel/`](../manifests/ate-install/otel), in the directory that carries the name of the mode. No bundle holds a copy of that ConfigMap, thus the mode of the install is the mode that the cluster keeps.

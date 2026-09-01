@@ -246,6 +246,8 @@ render_otel_config() {
   fi
   sed -e "s|^  OTEL_EXPORTER_OTLP_ENDPOINT:.*|  OTEL_EXPORTER_OTLP_ENDPOINT: ${ATE_OTLP_ENDPOINT}|" \
     -e "s|^    ate.dev/observability-mode:.*|    ate.dev/observability-mode: otlp|" \
+    -e 's|^  OTEL_TRACES_EXPORTER:.*|  OTEL_TRACES_EXPORTER: "otlp"|' \
+    -e 's|^  OTEL_METRICS_EXPORTER:.*|  OTEL_METRICS_EXPORTER: "otlp"|' \
     "${file}"
 }
 

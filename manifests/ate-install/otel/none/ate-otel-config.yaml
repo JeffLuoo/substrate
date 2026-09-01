@@ -48,3 +48,10 @@ metadata:
     ate.dev/observability-mode: none
 data:
   OTEL_EXPORTER_OTLP_ENDPOINT: ""
+  # The standard OTel switches, which internal/serverboot reads: each component
+  # builds no OTLP exporter at all. An empty endpoint alone would give the same
+  # result, because serverboot reads it as "no collector", but the two keys say
+  # so where an operator looks first. For mode otlp the installer replaces them
+  # with otlp, together with the endpoint above.
+  OTEL_TRACES_EXPORTER: "none"
+  OTEL_METRICS_EXPORTER: "none"
