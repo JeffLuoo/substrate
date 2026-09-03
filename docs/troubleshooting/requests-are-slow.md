@@ -23,7 +23,7 @@ and it does not include the response.
 | Yes | Small | In the code of the actor, or in the network. Read the logs of the actor. |
 | No | Large | Somebody waited, but not this client. For example, an operator did a resume. |
 
-Three different faults give a 503 error to the client:
+Four outcomes reach the client, and three of them are a 503 error:
 
 | What the client sees | Label | Cause |
 |---|---|---|
@@ -41,7 +41,7 @@ activations.
 
 Each step gives the query in two forms. Refer to
 [the naming rules](README.md#the-names-on-your-backend) for which form your
-backend needs, and for the three reasons a query can return nothing.
+backend needs, and for the reasons a query can return nothing.
 
 ---
 
@@ -73,6 +73,12 @@ sum by("ate.router.outcome") (
 `ok` on this metric means only that the router found an endpoint. It does not
 mean that the client got an answer.
 
+The table above holds the outcomes that send you to a different step. The
+router has more, and the `registry.ate.router` group of
+[the registry](../metrics/registry/metrics.yaml) lists each one. An outcome
+that is not in the table names its own cause; read it there and then go to
+step 4.
+
 ## Step 2. Divide the warm route from the resume
 
 **Keep both `ate.router.outcome` and `ate.router.resume` in the `by()` clause.**
@@ -81,9 +87,9 @@ reports `none` for a request that stopped before it reached a resume state. The
 outcome is what separates the two readings, thus the query must group by both.
 
 Keep the resume key for a second reason: if you remove it, the aggregation adds
-the warm route to the activation, and one distribution then holds both
-milliseconds and seconds. On this data the warm route is 23 ms and the
-activation is 488 ms, thus a merged number describes neither.
+the warm route to the activation. A warm route is milliseconds and an
+activation is hundreds of milliseconds or more, thus one distribution then
+holds both and the merged number describes neither.
 
 **Prometheus**
 
@@ -133,20 +139,15 @@ histogram_quantile(0.95, sum by(le, outcome) (
   rate({__name__="atenet.router.parking.wait.duration_bucket"}[5m])))
 ```
 
-* `parking.active` near the configured maximum (`--parked-request-max`,
-  default 1024) means that the parking area is almost full.
+* `parking.active` near the configured maximum means that the parking area is
+  almost full. `--parked-request-max` sets it. Refer to
+  [request-parking.md](../request-parking.md) for the flag and its default.
 * `parking.rejected` above zero means that the router refuses requests at the
   edge. Make the pool larger, or make the parking area larger.
 * The `outcome` label on the wait histogram does not start with `ate.`. This is
-  a known exception in `docs/metrics/substrate.yaml`.
-
-| `outcome` | Meaning |
-|---|---|
-| `served` | The resume was correct and the router sent the request. |
-| `budget_exhausted` | The park budget ended. The fleet stayed full. |
-| `timeout` | The time limit of the request ended. |
-| `canceled` | The client disconnected. |
-| `error` | The resume failed. |
+  a known exception in `docs/metrics/substrate.yaml`. Its permitted values are
+  in the `registry.ate.deviation` group of
+  [the registry](../metrics/registry/metrics.yaml).
 
 A value of `budget_exhausted` below the full budget is normal. The budget is
 per flight. A request that joins a flight late shares the remaining budget.

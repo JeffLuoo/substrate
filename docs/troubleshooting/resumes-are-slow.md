@@ -18,14 +18,11 @@ Two states give a resume, and their cost is not the same:
 | Paused | On the node VM, and the resume prefers that node | Low. No download. |
 | Suspended | In object storage (GCS or S3) | High. A download and an unpack. |
 
-`ate.snapshot.kind` tells you which snapshot the resume read:
-
-| Value | Meaning |
-|---|---|
-| `local` | A snapshot on the node. A pause wrote it. |
-| `latest` | The durable snapshot of the actor. |
-| `golden` | The image of the ActorTemplate. This is the first activation of a new actor. |
-| `boot` | A start from nothing. A boot is not a restore, thus this value never occurs on the atelet histograms. |
+`ate.snapshot.kind` tells you which snapshot the resume read. The permitted
+values and their meaning are in the `registry.ate.snapshot` group of
+[the registry](../metrics/registry/metrics.yaml). One of them changes what you
+can query: a `boot` is a start from nothing, thus it is not a restore and the
+atelet restore histogram has no data for it.
 
 Two instruments measure a resume. They do not measure the same part:
 
@@ -44,7 +41,7 @@ zero.
 
 Each step gives the query in two forms. Refer to
 [the naming rules](README.md#the-names-on-your-backend) for which form your
-backend needs, and for the three reasons a query can return nothing.
+backend needs, and for the reasons a query can return nothing.
 
 ---
 
@@ -81,11 +78,11 @@ histogram_quantile(0.95, sum by(le) (
 * The router number is much larger — the time went to the queue or to the
   scheduler. Go to step 5.
 
-**A quantile at the last bucket is saturated.** The lifecycle histogram of
-ateapi stops at 30 s. The restore histogram of atelet stops at 60 s. A value at
-or near the end of the range means only that the true value is somewhere above
-the buckets, thus the two instruments cannot be compared there. Read the mean
-instead, as step 2 does.
+**A quantile at the last bucket is saturated.** The two instruments do not use
+the same buckets, and the lifecycle histogram of ateapi ends before the restore
+histogram of atelet. A value at or near the end of either range means only that
+the true value is somewhere above the buckets, thus the two cannot be compared
+there. Read the mean instead, as step 2 does.
 * The restore query is empty but resumes occur — the resumes are boots. Confirm
   it:
 
@@ -148,14 +145,16 @@ sum by("ate.snapshot.phase") (
   increase({__name__="ate.actor.restore.duration_count","ate.failure.reason"=""}[30m]))
 ```
 
-| Phase | What is slow | Go to |
-|---|---|---|
-| `volume_mount` | The volumes of the actor. | The logs of atelet. |
-| `manifest_fetch` | The read of the snapshot manifest. | Step 3. |
-| `download` | Object storage. | Step 3. |
-| `oci_unpack` | The node, or the image cache missed. | Step 4. |
-| `sandbox_assets` | The sandbox assets on the node. | Step 4. |
-| `ateom_restore` | The sandbox runtime. | The logs of ateom. |
+The `registry.ate.snapshot` group of
+[the registry](../metrics/registry/metrics.yaml) says what each phase covers.
+The slowest phase says where to go next:
+
+| Phase | Go to |
+|---|---|
+| `volume_mount` | The logs of atelet. |
+| `manifest_fetch`, `download` | Step 3. |
+| `oci_unpack`, `sandbox_assets` | Step 4. |
+| `ateom_restore` | The logs of ateom. |
 
 If the filtered numbers are small but the unfiltered numbers are large, the
 subject is not the speed of the phase. It is the failures. Go to step 6.
@@ -204,6 +203,10 @@ A miss adds a pull and an unpack to each resume.
 ```promql
 sum by (ate_imagecache_outcome) (
   rate(ate_imagecache_requests_total[5m]))
+
+sum by (error_type) (
+  rate(ate_imagecache_requests_total{
+        ate_imagecache_outcome="error"}[5m]))
 ```
 
 **Cloud Monitoring / GMP**
@@ -211,14 +214,21 @@ sum by (ate_imagecache_outcome) (
 ```promql
 sum by("ate.imagecache.outcome") (
   rate({__name__="ate.imagecache.requests"}[5m]))
+
+sum by("error.type") (
+  rate({__name__="ate.imagecache.requests",
+        "ate.imagecache.outcome"="error"}[5m]))
 ```
 
-Calculate the hit ratio as `hit / (hit + miss)`. Keep `error`, `cancelled` and
-`timeout` out of the denominator.
+Calculate the hit ratio as `hit / (hit + miss)`. Keep the outcomes that are not
+a lookup result out of the denominator. The
+`registry.ate.imagecache` group of
+[the registry](../metrics/registry/metrics.yaml) lists them.
 
-If the outcome is `error`, `error.type` holds the HTTP status of the registry.
-The value `401` or `403` is a credential fault. The value `429` is a rate
-limit. Each other status reports `_OTHER`.
+Only the `error` outcome carries `error.type`, which holds the HTTP status that
+the registry of the image returned. Group by it to divide a credential fault
+from a rate limit from a fault of the registry. The permitted values are on
+`metric.ate.imagecache.requests` in the same file.
 
 ## Step 5. Examine the control plane
 
@@ -290,18 +300,18 @@ sum by("ate.snapshot.phase", "ate.failure.reason") (
         "ate.failure.reason"!=""}[5m]))
 ```
 
-| Reason | Cause |
+The `registry.ate.failure` group of
+[the registry](../metrics/registry/metrics.yaml) says what each reason means.
+The reason says which component to examine next:
+
+| Reason | Examine |
 |---|---|
-| `FAILED_GET_EXTERNAL_OBJECT` | The storage backend has a fault. |
-| `TERMINAL_FILE_SYSTEM_ERROR` | A permanent fault on the node. Usually the disks are full. |
-| `LOCAL_SNAPSHOT_GONE` | The node no longer has the local snapshot. |
-| `INVALID_SANDBOX_ASSET` | A sandbox asset is absent or bad. |
-| `INVALID_CHECKPOINT_RESULT` | ateom returned a checkpoint that is not valid. |
-| `INVALID_CONTAINER_CONFIG` | The ActorTemplate is not correct. |
-| `INVALID_OBJECT_URL` | The URL of the snapshot object is bad. |
-| `FAILED_SAVE_SNAPSHOT` | atelet could not write the snapshot. |
-| `WORKER_POD_GONE`, `WORKER_REASSIGNED`, `CORRUPTED_ASSIGNMENT` | A control plane fault. Examine ateapi. |
-| `UNKNOWN` | An infrastructure failure with no reason. Read the logs of atelet. |
+| `FAILED_GET_EXTERNAL_OBJECT`, `INVALID_OBJECT_URL` | The storage backend, and the URL of the snapshot object. |
+| `TERMINAL_FILE_SYSTEM_ERROR`, `LOCAL_SNAPSHOT_GONE`, `INVALID_SANDBOX_ASSET` | The node. Read the logs of atelet. |
+| `INVALID_CHECKPOINT_RESULT`, `FAILED_SAVE_SNAPSHOT` | The suspend path. A bad checkpoint makes the next resume fail. |
+| `INVALID_CONTAINER_CONFIG` | The ActorTemplate. |
+| `WORKER_POD_GONE`, `WORKER_REASSIGNED`, `CORRUPTED_ASSIGNMENT` | The control plane. Examine ateapi. |
+| `UNKNOWN` | Nothing else. The reason is absent, thus read the logs of atelet. |
 
 A slow resume and a failed suspend are related. A suspend that fails leaves no
 good snapshot for the next resume. Read the crash counter, which uses the same

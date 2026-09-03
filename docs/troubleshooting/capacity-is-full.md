@@ -7,7 +7,7 @@ An actor must hold a worker to run. When each worker is assigned, a new resume
 cannot start. The router parks the request, and then it returns
 `503 no free workers available`.
 
-Two different states look the same at the edge:
+Three different states look the same at the edge:
 
 | State | What it means | Where to see it |
 |---|---|---|
@@ -24,7 +24,7 @@ the pools of different namespaces into one series.
 
 Each step gives the query in two forms. Refer to
 [the naming rules](README.md#the-names-on-your-backend) for which form your
-backend needs, and for the three reasons a query can return nothing.
+backend needs, and for the reasons a query can return nothing.
 
 ---
 
@@ -120,11 +120,9 @@ histogram_quantile(0.5, sum by(le, "ate.scheduling.constraint") (
   rate({__name__="ate.scheduler.eligible_workers_bucket"}[5m])))
 ```
 
-| `ate.scheduling.constraint` | Meaning |
-|---|---|
-| `none` | The request has no constraint. |
-| `selector` | A label selector of an actor or a template applies. |
-| `required_nodes` | The request is pinned to specific node VMs. |
+The `registry.ate.scheduler` group of
+[the registry](../metrics/registry/metrics.yaml) says what each value of
+`ate.scheduling.constraint` is.
 
 **The value of this key does not tell you the cause.** An ActorTemplate with a
 `workerSelector` makes each of its requests `selector`, thus you never see
@@ -157,11 +155,11 @@ sum by("ate.scheduler.outcome") (
   rate({__name__="ate.scheduler.assignment.duration_count"}[5m]))
 ```
 
-| Outcome | Meaning |
+| Outcome | Go to |
 |---|---|
-| `assigned` | The scheduler took a worker. |
-| `no_free_worker` | No free worker was available. This shows the capacity. It is not a failure, thus it has no `error.type` key and it names no pool. |
-| `error` | The attempt failed. Only this outcome has an `error.type` key. |
+| `assigned` | The scheduler took a worker. If the users still get a 503 error, go to step 5. |
+| `no_free_worker` | This is capacity pressure and not a failure. Go to step 2 and to step 6. |
+| `error` | The query below. Only this outcome has an `error.type` key. |
 
 **Prometheus**
 
