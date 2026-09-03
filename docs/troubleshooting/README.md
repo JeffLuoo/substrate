@@ -21,6 +21,12 @@ The instruments and their labels are defined in
 is the source of truth. [`docs/observability.md`](../observability.md)
 describes logs, metrics, and traces as a whole.
 
+**These guides own the decision tree. The registry owns the definitions.** A
+guide tells you which query to run, how to read the result, and where to go
+next. It does not repeat the permitted values of a label, or the default of a
+flag. For those, open the registry, or the document that owns the flag. A copy
+in a guide goes out of date without a signal.
+
 ## The two paths
 
 Substrate has two paths, and the first question is always which one is slow.
