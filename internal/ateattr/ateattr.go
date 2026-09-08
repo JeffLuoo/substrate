@@ -343,10 +343,12 @@ func NormalizeSandboxClass(class string) string {
 	}
 }
 
-// SandboxClassAttribute sets ate.sandbox.class. Use it in place of
-// SandboxClassKey: no source of the class is validated, thus all emitters must
-// apply the same limit. recordSchedulerAssignment is the one exception. It
-// omits the attribute when the class is unknown.
+// SandboxClassAttribute sets ate.sandbox.class. No source of the class is
+// validated, thus an emitter that sets the attribute must set it through this
+// helper and not through SandboxClassKey.
+//
+// To omit the attribute while the class is unknown is a different choice, and
+// two emitters make it: recordSchedulerAssignment and snapshotOp.attrs.
 func SandboxClassAttribute(class string) attribute.KeyValue {
 	return SandboxClassKey.String(NormalizeSandboxClass(class))
 }
