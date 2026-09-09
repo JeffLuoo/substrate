@@ -65,26 +65,47 @@ After the `max`, you can add the counts together. The sum across the states is
 the size of the pool. The sum across the pools is the size of the fleet.
 
 * `idle` = 0 — the pool is full. Go to step 2.
-* `idle` > 0 and the resumes still fail — a constraint hides the workers. Go to
-  step 3.
+* `idle` > 0 and the resumes still fail — something removes the free workers.
+  Go to step 3.
+
+**`idle` counts each worker that holds no actor, including a worker that is
+draining.** The scheduler takes only a worker in the ACTIVE state, thus a pool
+in the middle of a rollout can report free workers that nothing can use. When
+`idle` is above 0 and step 3 gives 0 eligible workers, look for a rollout
+before you look for a selector:
+
+```bash
+kubectl ate get workers
+kubectl rollout status deploy -n <workerpool-namespace> <workerpool-name>
+```
+
+A long pod grace period keeps a draining worker in the count for as long as the
+period lasts.
 
 ## Step 2. Find out if the new capacity arrived
 
 **Prometheus**
 
 ```promql
-ate_workerpool_desired_workers
-  - on(ate_workerpool_namespace, ate_workerpool_name)
-    ate_workerpool_ready_workers
+max by (ate_workerpool_namespace, ate_workerpool_name) (
+  ate_workerpool_desired_workers)
+- max by (ate_workerpool_namespace, ate_workerpool_name) (
+  ate_workerpool_ready_workers)
 ```
 
 **Cloud Monitoring / GMP**
 
 ```promql
-{__name__="ate.workerpool.desired_workers"}
-  - on("ate.workerpool.namespace", "ate.workerpool.name")
-    {__name__="ate.workerpool.ready_workers"}
+max by("ate.workerpool.namespace", "ate.workerpool.name") (
+  {__name__="ate.workerpool.desired_workers"})
+- max by("ate.workerpool.namespace", "ate.workerpool.name") (
+  {__name__="ate.workerpool.ready_workers"})
 ```
+
+Reduce each side with `max` before the subtraction. A bare `on()` join needs
+exactly one series for each pool on both sides, and it fails with
+`found duplicate series for the match group` as soon as a second replica or a
+second `instance` reports the same pool.
 
 A value above 0 for more than a few minutes means that Kubernetes did not give
 the pods. The usual causes are an empty node pool, a quota, or a worker pod
@@ -97,8 +118,10 @@ kubectl describe pod -n <workerpool-namespace> <worker-pod>
 kubectl get events -n <workerpool-namespace> --sort-by=.lastTimestamp | tail -20
 ```
 
-If the difference is 0, the pool has each pod that it asked for. The pool is
-too small. Make `spec.replicas` larger, or add nodes.
+If the difference is 0, the pool has each pod that it asked for, thus
+Kubernetes is not the subject. Before you make `spec.replicas` larger, read
+step 6: a pool can be full of actors that do no work, and the answer is then a
+suspend policy and not more workers. Grow the pool when step 6 shows real load.
 
 ## Step 3. Find out if a constraint hides the workers
 
@@ -106,19 +129,30 @@ too small. Make `spec.replicas` larger, or add nodes.
 constraint filter. This is an early sign. It warns you before the first
 rejection.
 
+Read the fraction of decisions that found no worker at all. The `le="0"`
+bucket counts them, and the pool keys stay in the result, thus the
+"no pool agreed" series is visible here:
+
 **Prometheus**
 
 ```promql
-histogram_quantile(0.5, sum by (le, ate_scheduling_constraint) (
-  rate(ate_scheduler_eligible_workers_bucket[5m])))
+sum by (ate_workerpool_namespace, ate_workerpool_name, ate_scheduling_constraint) (
+  rate(ate_scheduler_eligible_workers_bucket{le="0"}[5m]))
+/ sum by (ate_workerpool_namespace, ate_workerpool_name, ate_scheduling_constraint) (
+  rate(ate_scheduler_eligible_workers_count[5m]))
 ```
 
 **Cloud Monitoring / GMP**
 
 ```promql
-histogram_quantile(0.5, sum by(le, "ate.scheduling.constraint") (
-  rate({__name__="ate.scheduler.eligible_workers_bucket"}[5m])))
+sum by("ate.workerpool.namespace", "ate.workerpool.name", "ate.scheduling.constraint") (
+  rate({__name__="ate.scheduler.eligible_workers_bucket", le="0"}[5m]))
+/ sum by("ate.workerpool.namespace", "ate.workerpool.name", "ate.scheduling.constraint") (
+  rate({__name__="ate.scheduler.eligible_workers_count"}[5m]))
 ```
+
+A result of 1 means that each decision found nothing. A median hides this,
+because it drops the pool keys and reports one number for the whole pool.
 
 The `registry.ate.scheduler` group of
 [the registry](../metrics/registry/metrics.yaml) says what each value of
@@ -132,8 +166,15 @@ The `registry.ate.scheduler` group of
 | Idle count (step 1) | Eligible workers | Cause |
 |---|---|---|
 | 0 | 0 | The pool is full. The constraint is not the subject. Go to step 2. |
-| Above 0 | 0 | The constraint hides the free workers. Examine the selector of the actor and of the template, and the labels of the workers. |
+| Above 0 | 0, constraint `required_nodes` | The actor is pinned to a node. A pause writes a snapshot on the node VM, and the resume that follows accepts only a worker on that VM. If the node has no free worker, the actor waits although the pool does not. |
+| Above 0 | 0, constraint `selector` | A label selector hides the free workers. Examine the selector of the actor and of the template, and the labels of the workers. |
+| Above 0 | 0, any constraint | A rollout can also be the cause. Refer to the note on draining workers in step 1. |
 | Above 0 | Above 0 | The capacity is available. The fault is elsewhere. Go to step 4. |
+
+**Node pinning is a hard filter.** It has no fallback: the scheduler does not
+place a pinned actor on a different node. Suspend the actor rather than pause
+it when it must be free to move, or add capacity to the node that holds the
+snapshot.
 
 A series with **both pool keys empty** means that no pool agreed with the
 request. Only this instrument reports that state, as one series with the value
@@ -242,7 +283,7 @@ resource use of the node:
 sum by (ate_template_name, ate_stats_source) (
   ate_actor_stats_memory_working_set_bytes)
 
-sum by (ate_template_name) (
+sum by (ate_template_name, ate_stats_source) (
   rate(ate_actor_stats_cpu_time_seconds_total[5m]))
 ```
 
@@ -252,7 +293,7 @@ sum by (ate_template_name) (
 sum by("ate.template.name", "ate.stats.source") (
   {__name__="ate.actor.stats.memory.working_set"})
 
-sum by("ate.template.name") (
+sum by("ate.template.name", "ate.stats.source") (
   rate({__name__="ate.actor.stats.cpu.time"}[5m]))
 ```
 

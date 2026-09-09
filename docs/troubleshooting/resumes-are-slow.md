@@ -15,8 +15,19 @@ Two states give a resume, and their cost is not the same:
 
 | State before | Where the snapshot is | Cost |
 |---|---|---|
-| Paused | On the node VM, and the resume prefers that node | Low. No download. |
+| Paused, scope `full` or `data` | On the node VM. The resume accepts only a worker on that VM. | Low. No download. |
+| Paused, scope `data_on_golden` | The data on the node VM, the guest state in object storage. | Medium. The golden files still download, at the same time as the local copy. |
 | Suspended | In object storage (GCS or S3) | High. A download and an unpack. |
+
+`ate.snapshot.scope`, not `ate.snapshot.kind`, tells the last two apart. A
+template with `onResume.fromData: Golden` takes the middle row, thus a local
+snapshot does not always mean a local-only restore. Group by both keys when a
+pause looks slower than you expect.
+
+A pause also pins the actor: the resume that follows accepts only a worker on
+the node that holds the snapshot. Refer to
+[capacity-is-full.md](capacity-is-full.md) when a pinned actor waits while the
+pool has free workers.
 
 `ate.snapshot.kind` tells you which snapshot the resume read. The permitted
 values and their meaning are in the `registry.ate.snapshot` group of
@@ -59,7 +70,7 @@ histogram_quantile(0.95, sum by (le) (
 
 histogram_quantile(0.95, sum by (le) (
   rate(ate_actor_restore_duration_seconds_bucket{
-        ate_snapshot_phase="total"}[5m])))
+        ate_snapshot_phase="total", ate_failure_reason=""}[5m])))
 ```
 
 **Cloud Monitoring / GMP**
@@ -71,12 +82,18 @@ histogram_quantile(0.95, sum by(le) (
 
 histogram_quantile(0.95, sum by(le) (
   rate({__name__="ate.actor.restore.duration_bucket",
-        "ate.snapshot.phase"="total"}[5m])))
+        "ate.snapshot.phase"="total", "ate.failure.reason"=""}[5m])))
 ```
+
+The restore query counts the restores that were correct only. A phase that
+fails holds its timer until it gives up, thus a failure would raise this number
+without any resume becoming slower. Step 2 uses the same filter.
 
 * The two numbers agree — the node is the cause. Go to step 2.
 * The router number is much larger — the time went to the queue or to the
   scheduler. Go to step 5.
+* The router number is much larger and the restore query is empty or thin — the
+  restores are failing, not slowing. Go to step 6 first.
 
 **A quantile at the last bucket is saturated.** The two instruments do not use
 the same buckets, and the lifecycle histogram of ateapi ends before the restore
@@ -173,14 +190,14 @@ A large snapshot makes a long download. Compare the templates.
 **Prometheus**
 
 ```promql
-histogram_quantile(0.95, sum by (le, ate_template_name) (
+histogram_quantile(0.95, sum by (le, ate_template_name, file_name) (
   rate(atelet_snapshot_size_bytes_bucket[1h])))
 ```
 
 **Cloud Monitoring / GMP**
 
 ```promql
-histogram_quantile(0.95, sum by(le, "ate.template.name") (
+histogram_quantile(0.95, sum by(le, "ate.template.name", "file.name") (
   rate({__name__="atelet.snapshot.size_bucket"}[1h])))
 ```
 
@@ -347,7 +364,7 @@ A node with no free memory or no free CPU makes each resume slow.
 sum by (ate_template_name, ate_stats_source) (
   ate_actor_stats_memory_working_set_bytes)
 
-sum by (ate_template_name) (
+sum by (ate_template_name, ate_stats_source) (
   rate(ate_actor_stats_cpu_time_seconds_total[5m]))
 
 ate_actor_stats_sampled_actors
@@ -359,7 +376,7 @@ ate_actor_stats_sampled_actors
 sum by("ate.template.name", "ate.stats.source") (
   {__name__="ate.actor.stats.memory.working_set"})
 
-sum by("ate.template.name") (
+sum by("ate.template.name", "ate.stats.source") (
   rate({__name__="ate.actor.stats.cpu.time"}[5m]))
 
 {__name__="ate.actor.stats.sampled_actors"}
