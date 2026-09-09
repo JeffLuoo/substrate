@@ -28,9 +28,15 @@ Four outcomes reach the client, and three of them are a 503 error:
 | What the client sees | Label | Cause |
 |---|---|---|
 | A slow but correct response | `ate.router.resume="triggered"` | The actor was not on a worker. The request paid for the resume. |
-| `503 no free workers available` | `ate.router.outcome="no_capacity"` | The park budget ended. The fleet stayed full. |
-| `503 router at capacity` | Counted in `parking.rejected` | The parking area is full. The router sheds load. |
+| `503 no free workers available` | `ate.router.outcome="no_capacity"` | The park budget ended and the fleet stayed full. |
+| `503 router at capacity` | `ate.router.outcome="no_capacity"`, and `parking.rejected` increases | The parking area is full. The router sheds the request without a wait. |
 | A 503 error with no capacity pressure | `ate.router.outcome="resume_error"` | A defect. Examine the router and ateapi. |
+
+**Two different faults share the `no_capacity` outcome.** The router maps each
+503 that it makes onto that one value, thus the label alone does not separate a
+full fleet from a full parking area. Only `parking.rejected` does, and step 3
+reads it. The two need opposite work: a full fleet needs more workers, a full
+parking area needs a larger lot or a shorter resume.
 
 **Parking** is why a full fleet does not immediately give an error. The router
 holds the request and does the resume again with a backoff. Refer to
@@ -63,11 +69,11 @@ sum by("ate.router.outcome") (
 
 | Outcome | Go to |
 |---|---|
-| `no_capacity` | The fleet has no free worker. Read [capacity-is-full.md](capacity-is-full.md). |
+| `no_capacity` | Step 3 first. It tells you whether the fleet or the parking area is full. Go to [capacity-is-full.md](capacity-is-full.md) only when the parking area is not the cause. |
 | `resume_error` | Step 3, and then the logs of ateapi. |
 | `ok` but slow | Step 2. |
 | `ok`, but the client got an error | The fault is after the boundary of the router. The router found the endpoint and Envoy could not use it. Go to step 5. |
-| `timeout` | The resume did not finish in the park budget. Go to step 3, and then read the logs of atelet on the worker node. |
+| `timeout` | The deadline of the request itself ended, or ateapi did not answer. This is **not** the park budget: an ended budget reports the condition that blocked the resume, which is usually `no_capacity`. Go to step 4. |
 | `cancelled` | The client gave up. Read step 2 to find how long it waited. |
 
 `ok` on this metric means only that the router found an endpoint. It does not
@@ -139,11 +145,19 @@ histogram_quantile(0.95, sum by(le, outcome) (
   rate({__name__="atenet.router.parking.wait.duration_bucket"}[5m])))
 ```
 
+**This step splits the two faults that share the `no_capacity` outcome.**
+
+| `parking.rejected` | Meaning | Next |
+|---|---|---|
+| Zero | The parking area had room. The requests waited and the fleet stayed full. | [capacity-is-full.md](capacity-is-full.md) |
+| Above zero | The parking area is full. The router shed the requests without a wait. | Make the lot larger with `--parked-request-max`, or make the resume faster with [resumes-are-slow.md](resumes-are-slow.md). Growing the pool does not help a shed request. |
+
+An absent `parking.rejected` series counts as zero: the counter appears only
+after its first increase.
+
 * `parking.active` near the configured maximum means that the parking area is
   almost full. `--parked-request-max` sets it. Refer to
   [request-parking.md](../request-parking.md) for the flag and its default.
-* `parking.rejected` above zero means that the router refuses requests at the
-  edge. Make the pool larger, or make the parking area larger.
 * The `outcome` label on the wait histogram does not start with `ate.`. This is
   a known exception in `docs/metrics/substrate.yaml`. Its permitted values are
   in the `registry.ate.deviation` group of
