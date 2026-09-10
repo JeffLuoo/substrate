@@ -53,7 +53,6 @@ import (
 	"github.com/agent-substrate/substrate/internal/substratex509"
 	"github.com/agent-substrate/substrate/internal/version"
 	"github.com/agent-substrate/substrate/internal/volume"
-	"github.com/agent-substrate/substrate/internal/volumepath"
 	atev1alpha1 "github.com/agent-substrate/substrate/pkg/api/v1alpha1"
 	"github.com/agent-substrate/substrate/pkg/client/clientset/versioned"
 	"github.com/agent-substrate/substrate/pkg/client/informers/externalversions"
@@ -82,7 +81,6 @@ import (
 	"k8s.io/apimachinery/pkg/util/validation/field"
 	"k8s.io/client-go/informers"
 	"k8s.io/client-go/kubernetes"
-	certlisters "k8s.io/client-go/listers/certificates/v1beta1"
 	"k8s.io/client-go/rest"
 	"k8s.io/utils/lru"
 )
@@ -274,22 +272,19 @@ func main() {
 	ateFactory := externalversions.NewSharedInformerFactory(ateClient, 0)
 	csiDriverConfigLister := ateFactory.Api().V1alpha1().CSIDriverConfigs().Lister()
 
-	// Start an informer on the ClusterTrustBundle we care about (currently
-	// only the egress trust bundle). The v1beta1 API is feature-gated: on a
-	// cluster that does not serve it, startup blocks at WaitForCacheSync
-	// below, with the reflector's errors naming the missing API.
-	coreFactory := informers.NewSharedInformerFactoryWithOptions(k8sClient, 0,
+	clusterTrustBundleInformerFactory := informers.NewSharedInformerFactoryWithOptions(k8sClient, 24*time.Hour,
 		informers.WithTweakListOptions(func(o *metav1.ListOptions) {
 			o.FieldSelector = fields.OneTermEqualSelector("metadata.name", supportedTrustBundles[EgressTrustBundleName]).String()
 		}))
-	clusterTrustBundleLister := coreFactory.Certificates().V1beta1().ClusterTrustBundles().Lister()
+	clusterTrustBundles := clusterTrustBundleInformerFactory.Certificates().V1beta1().ClusterTrustBundles()
+	systemInfoVolumes := newSystemInfoVolumeRefresher(clusterTrustBundles.Lister(), clusterTrustBundles.Informer())
 
 	stopCh := make(chan struct{})
 	defer close(stopCh)
 	ateFactory.Start(stopCh)
-	coreFactory.Start(stopCh)
+	clusterTrustBundleInformerFactory.Start(stopCh)
 	ateFactory.WaitForCacheSync(stopCh)
-	coreFactory.WaitForCacheSync(stopCh)
+	clusterTrustBundleInformerFactory.WaitForCacheSync(stopCh)
 
 	wmService := NewService(
 		ctx,
@@ -300,8 +295,9 @@ func main() {
 		instruments,
 		volPlugins,
 		csiDriverConfigLister,
-		clusterTrustBundleLister,
+		systemInfoVolumes,
 	)
+	go systemInfoVolumes.run(ctx)
 
 	// Pre-download sandbox assets as SandboxConfigs appear/change so the first
 	// Run/Restore on this node hits the cache. Best-effort: on failure the
@@ -436,15 +432,15 @@ func drainOnShutdown(ctx context.Context, srv *grpc.Server, readiness *serverboo
 type AteomHerder struct {
 	ateletpb.UnimplementedAteomHerderServer
 
-	ateomDialer              *AteomDialer
-	imageCache               *imagecache.Store
-	anonGCSClient            ategcs.ObjectStorage
-	gcsClient                ategcs.ObjectStorage
-	instruments              *Instruments
-	mu                       sync.RWMutex
-	volumePlugins            map[string]volume.VolumePluginWorkerPlane
-	csiDriverConfigLister    listersv1alpha1.CSIDriverConfigLister
-	clusterTrustBundleLister certlisters.ClusterTrustBundleLister
+	ateomDialer           *AteomDialer
+	imageCache            *imagecache.Store
+	anonGCSClient         ategcs.ObjectStorage
+	gcsClient             ategcs.ObjectStorage
+	instruments           *Instruments
+	mu                    sync.RWMutex
+	volumePlugins         map[string]volume.VolumePluginWorkerPlane
+	csiDriverConfigLister listersv1alpha1.CSIDriverConfigLister
+	systemInfoVolumes     *systemInfoVolumeRefresher
 }
 
 var _ ateletpb.AteomHerderServer = (*AteomHerder)(nil)
@@ -459,17 +455,17 @@ func NewService(
 	instruments *Instruments,
 	volumePlugins map[string]volume.VolumePluginWorkerPlane,
 	csiDriverConfigLister listersv1alpha1.CSIDriverConfigLister,
-	clusterTrustBundleLister certlisters.ClusterTrustBundleLister,
+	systemInfoVolumes *systemInfoVolumeRefresher,
 ) *AteomHerder {
 	wms := &AteomHerder{
-		ateomDialer:              ateomDialer,
-		imageCache:               imageCache,
-		anonGCSClient:            anonGCSClient,
-		gcsClient:                gcsClient,
-		instruments:              instruments,
-		volumePlugins:            volumePlugins,
-		csiDriverConfigLister:    csiDriverConfigLister,
-		clusterTrustBundleLister: clusterTrustBundleLister,
+		ateomDialer:           ateomDialer,
+		imageCache:            imageCache,
+		anonGCSClient:         anonGCSClient,
+		gcsClient:             gcsClient,
+		instruments:           instruments,
+		volumePlugins:         volumePlugins,
+		csiDriverConfigLister: csiDriverConfigLister,
+		systemInfoVolumes:     systemInfoVolumes,
 	}
 	return wms
 }
@@ -508,6 +504,14 @@ func (s *AteomHerder) Run(ctx context.Context, req *ateletpb.RunRequest) (resp *
 		return nil, fmt.Errorf("while recording sandbox assets: %w", err)
 	}
 
+	defer func() {
+		if err != nil {
+			s.systemInfoVolumes.Deregister(actorUID)
+		}
+	}()
+	if err := s.systemInfoVolumes.Register(actorUID, actorRef, systemInfoVolumesFor(actorUID, req.GetSpec())); err != nil {
+		return nil, err
+	}
 	if err := s.prepareOCIBundles(ctx, actorUID, actorRef,
 		req.GetSpec(), sandboxRec.PauseImage, req.GetTargetAteomUid(),
 	); err != nil {
@@ -662,6 +666,8 @@ func (s *AteomHerder) Checkpoint(ctx context.Context, req *ateletpb.CheckpointRe
 		op.failedPhase = ateattr.SnapshotPhaseAteomCheckpoint
 		return nil, fmt.Errorf("while calling ateom.CheckpointWorkload: %w", err)
 	}
+
+	s.systemInfoVolumes.Deregister(actorUID)
 
 	sandboxRec.SnapshotFiles = resp.GetSnapshotFiles()
 	if len(sandboxRec.SnapshotFiles) == 0 && shouldHaveSnapshots(req) {
@@ -1107,6 +1113,13 @@ func (s *AteomHerder) Restore(ctx context.Context, req *ateletpb.RestoreRequest)
 		runtimeRec = goldenRec
 	}
 
+	// Undo the Register if the restore fails.
+	defer func() {
+		if err != nil {
+			s.systemInfoVolumes.Deregister(actorUID)
+		}
+	}()
+
 	// Download the memory snapshot and prepare the sandbox assets + OCI bundle
 	// CONCURRENTLY. They are independent — only the final ateom.RestoreWorkload
 	// needs both — so overlapping the GCS download (~0.5s warm) with the asset
@@ -1174,6 +1187,10 @@ func (s *AteomHerder) Restore(ctx context.Context, req *ateletpb.RestoreRequest)
 		if err != nil {
 			prepFailedPhase = ateattr.SnapshotPhaseSandboxAssets
 			return ateerrors.CrashIfReason(ctx, err, ateerrors.ReasonFailedGetExternalObject, ateerrors.ReasonInvalidObjectURL, ateerrors.ReasonTerminalFileSystemError, ateerrors.ReasonInvalidSandboxAsset)
+		}
+		if err = s.systemInfoVolumes.Register(actorUID, actorRef, systemInfoVolumesFor(actorUID, req.GetSpec())); err != nil {
+			prepFailedPhase = ateattr.SnapshotPhaseOCIUnpack
+			return err
 		}
 		t := time.Now()
 		err = s.prepareOCIBundles(gctx, actorUID, actorRef, req.GetSpec(), runtimeRec.PauseImage, req.GetTargetAteomUid())
@@ -1294,6 +1311,9 @@ func (s *AteomHerder) Terminate(ctx context.Context, req *ateletpb.TerminateRequ
 			return nil, fmt.Errorf("failed calling ateom.TerminateWorkload (actor: %s, actorUID: %s): %w", actorRef, actorUID, err)
 		}
 	}
+
+	// Deregister after teardown succeeds
+	s.systemInfoVolumes.Deregister(actorUID)
 
 	// Unmount external volumes
 	if err := s.unmountExternalVolumes(ctx, actorUID, req.GetSpec().GetVolumes()); err != nil {
@@ -1559,17 +1579,11 @@ func (s *AteomHerder) prepareOCIBundles(
 ) error {
 	// Prepare host folders for volume types that need them.
 	for _, vol := range spec.GetVolumes() {
-		switch volSrc := vol.GetSource().(type) {
+		switch vol.GetSource().(type) {
 		case *ateletpb.Volume_DurableDir:
 			volPath := ateompath.DurableDirVolumeMountPoint(actorUID, vol.GetName())
 			if err := os.MkdirAll(volPath, 0o700); err != nil {
 				return fmt.Errorf("while creating %q: %w", volPath, err)
-			}
-
-		case *ateletpb.Volume_SystemInfo:
-			volRootHostPath := ateompath.SystemInfoVolumeRoot(actorUID, vol.GetName())
-			if err := writeSystemInfoVolume(ctx, volRootHostPath, actorRef, actorUID, s.clusterTrustBundleLister, volSrc.SystemInfo); err != nil {
-				return fmt.Errorf("while populating system-info volume %q: %w", vol.GetName(), err)
 			}
 		}
 	}
@@ -1628,86 +1642,6 @@ func (s *AteomHerder) prepareOCIBundles(
 	}
 
 	return g.Wait()
-}
-
-// writeSystemInfoVolume populates the root directory of a system-info volume
-// with one file per projected item. It runs on every Run/Restore, before the
-// sandbox starts, so the files carry the values of the actor actually being
-// started, no matter what checkpointed state it boots from.
-//
-// Every file must be a plain file at a stable real path across regenerations:
-// the micro-VM virtiofsds run in find-paths migration mode, which re-binds
-// the guest's FUSE state to files by the paths recorded at suspend, and
-// gVisor's gofer likewise re-opens files by path on restore. Symlink-swap
-// schemes (kubelet's atomic writer) move the payload files to a new
-// timestamped directory on every write and delete the old one, so guest
-// state from the snapshot could not re-bind. Per-file write-to-temp-and-
-// rename is atomic enough: this only runs while the sandbox is down, so no
-// reader can observe a partial write.
-//
-// TODO(#802): rotating data sources (identity JWTs, certificates) will need
-// these files refreshed while the actor runs, not just at Run/Restore — and
-// must keep the per-file rename discipline so visible paths never move.
-// actorMetadata never changes after start, so writing here is enough for it.
-//
-// TODO(#932): trustBundle projections currently refresh only here, on
-// Run/Restore; live refresh for running actors is PR 2 of that issue.
-func writeSystemInfoVolume(ctx context.Context, rootPath string, actorRef resources.ActorRef, actorUID string, ctbLister certlisters.ClusterTrustBundleLister, si *ateletpb.SystemInfoVolume) error {
-	if err := os.MkdirAll(rootPath, 0o755); err != nil {
-		return fmt.Errorf("while creating %q: %w", rootPath, err)
-	}
-
-	for _, dataSourceAny := range si.GetDataSources() {
-		switch dataSource := dataSourceAny.GetDataSource().(type) {
-		case *ateletpb.SystemInfoDataSource_TrustBundle:
-			tb := dataSource.TrustBundle
-			pemBundle, err := resolveTrustBundle(ctbLister, tb.GetName())
-			if err != nil {
-				return fmt.Errorf("system-info projection %q: %w", tb.GetPath(), err)
-			}
-			if err := writeSystemInfoFile(rootPath, tb.GetPath(), pemBundle); err != nil {
-				return err
-			}
-		case *ateletpb.SystemInfoDataSource_ActorMetadata:
-			for _, item := range dataSource.ActorMetadata.GetItems() {
-				var value string
-				switch item.GetField() {
-				case ateletpb.ActorMetadataField_ACTOR_METADATA_FIELD_NAME:
-					value = actorRef.Name
-				case ateletpb.ActorMetadataField_ACTOR_METADATA_FIELD_ATESPACE:
-					value = actorRef.Atespace
-				case ateletpb.ActorMetadataField_ACTOR_METADATA_FIELD_UID:
-					value = actorUID
-				default:
-					// Unknown fields come only from a newer ateapi; skip the
-					// item rather than write an empty file under its path.
-					continue
-				}
-				if err := writeSystemInfoFile(rootPath, item.GetPath(), []byte(value)); err != nil {
-					return err
-				}
-			}
-		}
-	}
-	return nil
-}
-
-// writeSystemInfoFile writes one projected file at relPath under rootPath via
-// write-to-temp-and-rename, creating parent directories as needed. relPath is
-// re-checked against the rule ateapi applied at template creation: atelet is
-// the last line before the value hits the host filesystem.
-func writeSystemInfoFile(rootPath, relPath string, data []byte) error {
-	if err := volumepath.ValidateProjected(relPath); err != nil {
-		return fmt.Errorf("invalid system-info path %q: %w", relPath, err)
-	}
-	dst := filepath.Join(rootPath, filepath.FromSlash(relPath))
-	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
-		return fmt.Errorf("while creating parent of %q: %w", dst, err)
-	}
-	if err := writeFileAtomic(dst, data, 0o644); err != nil {
-		return fmt.Errorf("while writing system-info file %q: %w", dst, err)
-	}
-	return nil
 }
 
 // dialAteom opens (or reuses) the gRPC connection to the target ateom
