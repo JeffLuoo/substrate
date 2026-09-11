@@ -173,6 +173,65 @@ func TestResolveObservability(t *testing.T) {
 	}
 }
 
+// The ConfigMap has more than one writer: hack/install-ate.sh patches the
+// collector of a measurement into it and leaves the annotation of the mode
+// before it. The endpoint is what the components read, thus the install must
+// keep it and not put the collector of the stale annotation back over it.
+func TestResolveObservabilityEndpointWinsOverStaleAnnotation(t *testing.T) {
+	const meter = "http://telemetry-meter.benchmarking.svc:4317"
+	gkeEndpoint := endpointInFileForTest(t, config.ObservabilityGKE)
+
+	tests := []struct {
+		name         string
+		annotation   string
+		endpoint     string
+		wantMode     string
+		wantEndpoint string
+	}{{
+		name:         "an annotation that agrees with the endpoint stays",
+		annotation:   config.ObservabilityGKE,
+		endpoint:     gkeEndpoint,
+		wantMode:     config.ObservabilityGKE,
+		wantEndpoint: gkeEndpoint,
+	}, {
+		name:         "a patched endpoint wins over the annotation of mode gke",
+		annotation:   config.ObservabilityGKE,
+		endpoint:     meter,
+		wantMode:     config.ObservabilityOTLP,
+		wantEndpoint: meter,
+	}, {
+		name:         "a patched endpoint wins over the annotation of mode none",
+		annotation:   config.ObservabilityNone,
+		endpoint:     meter,
+		wantMode:     config.ObservabilityOTLP,
+		wantEndpoint: meter,
+	}, {
+		// No manifest holds the address of mode otlp, thus the ConfigMap is its
+		// only source and the two cannot disagree.
+		name:         "mode otlp keeps its own address",
+		annotation:   config.ObservabilityOTLP,
+		endpoint:     meter,
+		wantMode:     config.ObservabilityOTLP,
+		wantEndpoint: meter,
+	}}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			e := testEnv(t, &config.Config{}, otelConfigMap(tc.annotation, tc.endpoint))
+			got, err := e.ResolveObservability(context.Background())
+			if err != nil {
+				t.Fatalf("ResolveObservability: %v", err)
+			}
+			if got.mode != tc.wantMode {
+				t.Errorf("mode = %q, want %q", got.mode, tc.wantMode)
+			}
+			if got.endpoint != tc.wantEndpoint {
+				t.Errorf("endpoint = %q, want %q", got.endpoint, tc.wantEndpoint)
+			}
+		})
+	}
+}
+
 // Mode otlp takes the file of mode none, thus the endpoint and the two exporter
 // switches in it must carry the given collector and not the empty default.
 func TestRenderOtelConfigOTLP(t *testing.T) {

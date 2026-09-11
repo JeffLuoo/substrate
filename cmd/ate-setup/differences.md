@@ -271,7 +271,10 @@ collector
 ([`docs/observability.md`](../../docs/observability.md#selecting-a-collector)).
 `hack/install-ate.sh` has no such flag: it keeps its two cases, the kind
 collector for a kind install and the GKE managed one for each other install,
-and keeps `--otlp-endpoint` as a patch after the apply.
+and keeps `--otlp-endpoint` as a patch after the apply. That patch stamps the
+mode annotation too, thus a later `ate-setup` run keeps the collector it named
+instead of putting the collector of the mode before it back over one that
+works.
 
 **Cloud SQL is shell-only.** `hack/install-ate.sh` automates Cloud SQL setup
 with IAM authentication, synthesized DSNs, and the Auth Proxy sidecar
