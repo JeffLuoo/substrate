@@ -374,6 +374,8 @@ The install tests the mode before it applies a workload. A mode that names a col
 
 Each mode supplies the `ate-otel-config` ConfigMap from its own file under [`manifests/ate-install/otel/`](../manifests/ate-install/otel), in the directory that carries the name of the mode. No bundle holds a copy of that ConfigMap, thus the mode of the install is the mode that the cluster keeps.
 
+Mode `otlp` holds its address nowhere, thus it takes the file of another mode and the install writes the address into it: the `kind` file on a kind install, and the `none` file on each other install. Thus a kind cluster that names its own collector keeps `OTEL_METRIC_EXPORT_INTERVAL` and `OTEL_METRIC_EXPORT_TIMEOUT`, which shorten the 60s export tick of the SDK to 10s. Those two belong to the cluster and not to the collector: a component is invisible until its first tick, and the metrics e2e suite asserts against the scrape of the collector on a bounded deadline.
+
 `hack/install-ate.sh` has no mode flag: it applies the `kind` file for a kind install and the `gke` file for each other install, as before. Use `ate-setup` for the other modes.
 
 ### The mode of a cluster

@@ -526,3 +526,63 @@ func TestRestartOtelConsumersReachesEachWorkload(t *testing.T) {
 		}
 	}
 }
+
+// The shortened metric export tick is a property of a kind cluster, and not of
+// its collector: a component is invisible until its first tick, and the metrics
+// e2e suite asserts on a bounded deadline. Thus a kind cluster that names its
+// own collector keeps the tick, and each other install keeps the SDK default.
+func TestRenderOtelConfigKeepsTheKindExportInterval(t *testing.T) {
+	const key = "OTEL_METRIC_EXPORT_INTERVAL"
+	kindValue := func(t *testing.T) string {
+		t.Helper()
+		e := testEnv(t, &config.Config{})
+		objs, err := kube.LoadPath(e.otelConfigPath(config.ObservabilityKind))
+		if err != nil || len(objs) != 1 {
+			t.Fatalf("loading the ConfigMap of mode kind: %v", err)
+		}
+		value, _, _ := unstructured.NestedString(objs[0].Object, "data", key)
+		if value == "" {
+			t.Fatalf("the ConfigMap of mode kind names no %s", key)
+		}
+		return value
+	}(t)
+
+	tests := []struct {
+		name  string
+		cfg   config.Config
+		want  string
+		wantK string
+	}{{
+		name:  "mode otlp on a kind install keeps the tick",
+		cfg:   config.Config{Kind: true, OtlpEndpoint: "http://collector.obs.svc:4317"},
+		want:  kindValue,
+		wantK: "http://collector.obs.svc:4317",
+	}, {
+		name:  "mode otlp on each other install keeps the SDK default",
+		cfg:   config.Config{OtlpEndpoint: "http://collector.obs.svc:4317"},
+		want:  "",
+		wantK: "http://collector.obs.svc:4317",
+	}, {
+		name:  "mode kind keeps the tick",
+		cfg:   config.Config{Kind: true},
+		want:  kindValue,
+		wantK: endpointInFileForTest(t, config.ObservabilityKind),
+	}}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			e := testEnv(t, &tc.cfg)
+			got, err := e.ResolveObservability(context.Background())
+			if err != nil {
+				t.Fatalf("ResolveObservability: %v", err)
+			}
+			interval, _, _ := unstructured.NestedString(got.obj.Object, "data", key)
+			if interval != tc.want {
+				t.Errorf("data[%s] = %q, want %q", key, interval, tc.want)
+			}
+			if got.endpoint != tc.wantK {
+				t.Errorf("endpoint = %q, want %q", got.endpoint, tc.wantK)
+			}
+		})
+	}
+}

@@ -81,14 +81,24 @@ type observabilityState struct {
 }
 
 // otelConfigPath returns the manifest that supplies the ConfigMap of a mode.
-// Mode otlp uses the file of mode none, and renderOtelConfig puts the given
-// endpoint in it.
+// Mode otlp holds its address nowhere, thus it takes the file of another mode
+// and renderOtelConfig puts the given endpoint in it.
+//
+// On a kind install that other file is the kind one, and not the none one. The
+// file of mode kind carries OTEL_METRIC_EXPORT_INTERVAL and
+// OTEL_METRIC_EXPORT_TIMEOUT, which shorten the 60s export tick of the SDK to
+// 10s: a component is invisible to the collector until its first tick, and the
+// metrics e2e suite asserts against the scrape of the collector on a bounded
+// deadline. Those two are a property of the cluster and not of the collector,
+// thus a kind cluster that names its own collector keeps them.
 func (e *Env) otelConfigPath(mode string) string {
-	switch mode {
-	case config.ObservabilityKind:
+	switch {
+	case mode == config.ObservabilityKind:
 		return e.Cfg.Manifest("otel", "kind", "ate-otel-config.yaml")
-	case config.ObservabilityGKE:
+	case mode == config.ObservabilityGKE:
 		return e.Cfg.Manifest("otel", "gke", "ate-otel-config.yaml")
+	case mode == config.ObservabilityOTLP && e.Cfg.Kind:
+		return e.Cfg.Manifest("otel", "kind", "ate-otel-config.yaml")
 	default:
 		return e.Cfg.Manifest("otel", "none", "ate-otel-config.yaml")
 	}
