@@ -115,6 +115,25 @@ func (e *Env) readClusterObservability(ctx context.Context) {
 	e.observability.clusterMode = cm.Annotations[otelModeAnnotation]
 	if e.observability.clusterMode == "" {
 		e.observability.clusterMode = e.modeOfEndpoint(e.observability.clusterEndpoint)
+		return
+	}
+
+	// The annotation and the endpoint can disagree, because the ConfigMap has
+	// more than one writer: an operator can edit it, and hack/install-ate.sh
+	// patches the collector of a measurement into it. The components read the
+	// endpoint, thus the endpoint is the collector of the cluster and the
+	// annotation is stale. Taking the annotation instead would put the collector
+	// of the stale mode back over one that works.
+	//
+	// Mode otlp is out of this test: no manifest holds its address, thus the
+	// ConfigMap is the only source of it and the two cannot disagree.
+	if e.observability.clusterMode == config.ObservabilityOTLP {
+		return
+	}
+	if want := endpointInFile(e.otelConfigPath(e.observability.clusterMode)); want != e.observability.clusterEndpoint {
+		log.Warnf("the %s ConfigMap says mode %s, whose collector is %q, and names %q; taking the endpoint",
+			otelConfigMapName, e.observability.clusterMode, want, e.observability.clusterEndpoint)
+		e.observability.clusterMode = e.modeOfEndpoint(e.observability.clusterEndpoint)
 	}
 }
 

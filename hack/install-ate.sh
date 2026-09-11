@@ -450,13 +450,21 @@ apply_otel_endpoint_override() {
     return 0
   fi
 
+  # The mode annotation goes with the endpoint. ate-setup reads that annotation
+  # back to keep the collector that the cluster has, thus an endpoint on its own
+  # would leave the ConfigMap saying one mode and naming the collector of
+  # another, and the next ate-setup run would put the collector of the
+  # annotation back over this one. The exporter switches go with it for the same
+  # reason: the file of mode none turns them off.
   echo "Overriding OTEL_EXPORTER_OTLP_ENDPOINT with ${ATE_OTLP_ENDPOINT}"
   run_kubectl -n ate-system patch configmap ate-otel-config --type=merge \
-    -p "{\"data\":{\"OTEL_EXPORTER_OTLP_ENDPOINT\":\"${ATE_OTLP_ENDPOINT}\"}}"
+    -p "{\"metadata\":{\"annotations\":{\"ate.dev/observability-mode\":\"otlp\"}},\
+\"data\":{\"OTEL_EXPORTER_OTLP_ENDPOINT\":\"${ATE_OTLP_ENDPOINT}\",\
+\"OTEL_TRACES_EXPORTER\":\"otlp\",\"OTEL_METRICS_EXPORTER\":\"otlp\"}}"
 
   local workload
   for workload in deployment/ate-api-server deployment/ate-controller \
-                  deployment/atenet-router; do
+                  deployment/atenet-router deployment/atenet-egress; do
     if run_kubectl -n ate-system get "${workload}" >/dev/null 2>&1; then
       run_kubectl -n ate-system rollout restart "${workload}"
     fi
