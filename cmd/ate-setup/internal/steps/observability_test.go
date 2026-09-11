@@ -16,9 +16,11 @@ package steps
 
 import (
 	"context"
+	"slices"
 	"strings"
 	"testing"
 
+	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -337,4 +339,131 @@ func endpointInFileForTest(t *testing.T, mode string) string {
 		t.Fatalf("no endpoint in the manifest of mode %s", mode)
 	}
 	return endpoint
+}
+
+// readsOtelConfig reports whether a workload takes the ate-otel-config
+// ConfigMap through envFrom on one of its containers.
+func readsOtelConfig(obj *unstructured.Unstructured) bool {
+	for _, field := range []string{"containers", "initContainers"} {
+		containers, _, _ := unstructured.NestedSlice(obj.Object, "spec", "template", "spec", field)
+		for _, c := range containers {
+			container, ok := c.(map[string]any)
+			if !ok {
+				continue
+			}
+			sources, _, _ := unstructured.NestedSlice(container, "envFrom")
+			for _, s := range sources {
+				source, ok := s.(map[string]any)
+				if !ok {
+					continue
+				}
+				name, _, _ := unstructured.NestedString(source, "configMapRef", "name")
+				if name == otelConfigMapName {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
+// A workload that reads the ConfigMap and is absent from the restart keeps the
+// collector of the install before it, with no message. Thus the list must
+// follow the manifests, and this test fails when a new consumer arrives.
+func TestOtelConsumersMatchTheManifests(t *testing.T) {
+	e := testEnv(t, &config.Config{})
+	objs, err := kube.LoadPath(e.Cfg.Manifest())
+	if err != nil {
+		t.Fatalf("loading the manifests: %v", err)
+	}
+
+	deployments := map[string]bool{}
+	others := map[string]string{}
+	for _, obj := range objs {
+		if !readsOtelConfig(obj) {
+			continue
+		}
+		if obj.GetKind() == "Deployment" {
+			deployments[obj.GetName()] = true
+			continue
+		}
+		others[obj.GetKind()] = obj.GetName()
+	}
+	if len(deployments) == 0 {
+		t.Fatal("no Deployment in the manifests reads the ConfigMap; the scan is broken")
+	}
+
+	for name := range deployments {
+		if !slices.Contains(otelConsumerDeployments, name) {
+			t.Errorf("Deployment %s reads %s and is absent from otelConsumerDeployments", name, otelConfigMapName)
+		}
+	}
+	for _, name := range otelConsumerDeployments {
+		if !deployments[name] {
+			t.Errorf("otelConsumerDeployments names %s, which reads no %s in the manifests", name, otelConfigMapName)
+		}
+	}
+
+	// The DaemonSets take the restart by label, thus they are correct outside
+	// the list. Each other kind would take a restart call of its own.
+	delete(others, "DaemonSet")
+	for kind, name := range others {
+		t.Errorf("%s %s reads %s and no restart covers it", kind, name, otelConfigMapName)
+	}
+}
+
+// restartedAtAnnotation is what a rollout restart stamps on a pod template; see
+// kube.RolloutRestart.
+const restartedAtAnnotation = "kubectl.kubernetes.io/restartedAt"
+
+// The name of an atelet DaemonSet carries the version suffix of the install
+// that made it, thus a restart by the bare name reaches nothing and the node
+// keeps the collector of the install before it, with no message.
+func TestRestartOtelConsumersReachesEachWorkload(t *testing.T) {
+	deployment := func(name string) *appsv1.Deployment {
+		return &appsv1.Deployment{
+			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: NamespaceAteSystem},
+		}
+	}
+	daemonSet := func(name string) *appsv1.DaemonSet {
+		return &appsv1.DaemonSet{ObjectMeta: metav1.ObjectMeta{
+			Name:      name,
+			Namespace: NamespaceAteSystem,
+			Labels:    map[string]string{"app": "atelet"},
+		}}
+	}
+
+	objects := []runtime.Object{
+		// Two versions, as a cluster in a rolling upgrade holds.
+		daemonSet("atelet-v1-2-3"), daemonSet("atelet-v1-2-4"),
+	}
+	for _, name := range otelConsumerDeployments {
+		objects = append(objects, deployment(name))
+	}
+
+	e := testEnv(t, &config.Config{Observability: config.ObservabilityNone}, objects...)
+	e.observability.changed = true
+	if err := e.restartOtelConsumers(context.Background()); err != nil {
+		t.Fatalf("restartOtelConsumers: %v", err)
+	}
+
+	ctx := context.Background()
+	for _, name := range otelConsumerDeployments {
+		got, err := e.Kube.Typed.AppsV1().Deployments(NamespaceAteSystem).Get(ctx, name, metav1.GetOptions{})
+		if err != nil {
+			t.Fatalf("reading deployment %s: %v", name, err)
+		}
+		if got.Spec.Template.Annotations[restartedAtAnnotation] == "" {
+			t.Errorf("deployment %s was not restarted", name)
+		}
+	}
+	for _, name := range []string{"atelet-v1-2-3", "atelet-v1-2-4"} {
+		got, err := e.Kube.Typed.AppsV1().DaemonSets(NamespaceAteSystem).Get(ctx, name, metav1.GetOptions{})
+		if err != nil {
+			t.Fatalf("reading daemonset %s: %v", name, err)
+		}
+		if got.Spec.Template.Annotations[restartedAtAnnotation] == "" {
+			t.Errorf("daemonset %s was not restarted", name)
+		}
+	}
 }
