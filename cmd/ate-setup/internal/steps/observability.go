@@ -44,9 +44,13 @@ const (
 const gkeOtelNamespace = "gke-managed-otel"
 
 // otelConsumerDeployments are the Deployments that read the ConfigMap with
-// envFrom. The atelet DaemonSet reads it too; it takes a different restart
-// call, thus restartOtelConsumers names it on its own.
-var otelConsumerDeployments = []string{"ate-api-server", "ate-controller", "atenet-router"}
+// envFrom. The atelet DaemonSets read it too; they carry a version suffix in
+// their names, thus restartOtelConsumers restarts them by label.
+//
+// Both egress manifests declare one Deployment of the name atenet-egress, thus
+// one entry covers the shipped gateway and the sdsmint one.
+// TestOtelConsumersMatchTheManifests holds this list to the manifests.
+var otelConsumerDeployments = []string{"ate-api-server", "ate-controller", "atenet-router", "atenet-egress"}
 
 // clusterServicePattern matches the host of an endpoint that names a Service of
 // this cluster: service.namespace.svc, with or without cluster.local.
@@ -417,5 +421,8 @@ func (e *Env) restartOtelConsumers(ctx context.Context) error {
 			return err
 		}
 	}
-	return e.Kube.RolloutRestart(ctx, NamespaceAteSystem, "atelet", now)
+	// By label, and not by name: an atelet DaemonSet carries the version suffix
+	// of the install that made it, and a cluster in a rolling upgrade holds one
+	// of each version. Each of them reads the ConfigMap.
+	return e.RestartAteletDaemonSets(ctx)
 }
