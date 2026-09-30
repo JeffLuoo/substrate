@@ -132,7 +132,7 @@ func TestRelayAttrs(t *testing.T) {
 func collectedResource(t *testing.T, relayCapable bool, conn *grpc.ClientConn) map[string]string {
 	t.Helper()
 	reader := sdkmetric.NewManualReader()
-	mp, err := newMeterProvider(context.Background(), "ateom-gvisor", relayCapable, conn, nil, reader)
+	mp, err := newMeterProvider(context.Background(), "ateom-gvisor", metricsExporterOTLP, relayCapable, conn, nil, reader)
 	if err != nil {
 		t.Fatalf("newMeterProvider: %v", err)
 	}

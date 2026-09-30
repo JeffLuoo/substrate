@@ -318,7 +318,9 @@ Weaver permits only `groups` and `imports` at the top level of a registry file, 
 
 ### Bridged controller-runtime metrics (atecontroller)
 
-atecontroller bridges controller-runtime's private Prometheus registry, which the manager serves on an unscraped `:8080`, onto its OTLP reader. So `controller_runtime_*`, `workqueue_*`, `certwatcher_*`, `rest_client_*`, `leader_election_*`, `go_*`, and `process_*` reach the collector too, keeping their Prometheus names because they are upstream instruments and renaming them would break existing controller-runtime dashboards.
+atecontroller bridges controller-runtime's private Prometheus registry, which the manager serves on `:8080`, onto its OTLP reader. So `controller_runtime_*`, `workqueue_*`, `certwatcher_*`, `rest_client_*`, `leader_election_*`, `go_*`, and `process_*` reach the collector too, keeping their Prometheus names because they are upstream instruments and renaming them would break existing controller-runtime dashboards.
+
+With `OTEL_METRICS_EXPORTER=none`, atecontroller does not bridge the registry. Instead, it registers its own instruments (`ate.workerpool.*`) on that registry, so `:8080` serves all of them. Refer to [Scraping instead of pushing](#scraping-instead-of-pushing).
 
 These can be used to answer whether the controller is keeping up, e.g. rising `workqueue_depth` or `workqueue_queue_duration_seconds` means reconciles are falling behind, and `controller_runtime_reconcile_errors_total` says which controller.
 
@@ -401,6 +403,15 @@ Telemetry is emitted the same way everywhere; only the backend differs between a
 > Every component reads that endpoint from the shared `ate-otel-config` ConfigMap ([`manifests/ate-install/ate-otel-config.yaml`](../manifests/ate-install/ate-otel-config.yaml), with a Kind replacement of the same name under [`manifests/ate-install/kind/`](../manifests/ate-install/kind/ate-otel-config.yaml)). Editing it does not restart the pods that consume it — follow a change with `kubectl rollout restart`.
 >
 > ateom workers don't read the ConfigMap at all — `ate-controller` copies the value into each worker pod at creation. A new endpoint reaches them only once the controller itself restarts, and that restart then rolls every WorkerPool Deployment, replacing the running workers along with the actors on them.
+
+### Scraping instead of pushing
+
+Each Go component pushes its metrics over OTLP. ateapi, atelet, atenet-router, and the credential provider also serve the same instruments on a Prometheus `/metrics` endpoint. atecontroller serves controller-runtime's registry on `:8080`. A deployment that scrapes these endpoints and also sets `OTEL_EXPORTER_OTLP_ENDPOINT` gets each metric two times, with two names: for example, `ate_actor_crashes` from the push and `ate_actor_crashes_total` from the scrape.
+
+To stop the push, set `OTEL_METRICS_EXPORTER=none`, for example in `ate-otel-config`. The Prometheus endpoints continue to serve, and traces and logs continue to go to the collector. Only `otlp` (the default) and `none` are valid values. A different value keeps `otlp`, and the component logs a warning.
+
+* atecontroller has no Prometheus reader of its own. With `none`, it registers `ate.workerpool.*` on controller-runtime's registry, so scrape `:8080` for them.
+* atecontroller does not pass `OTEL_METRICS_EXPORTER` to the worker pods, so the ateoms continue to push through [the relay](#the-ateom-otlp-relay). ateom has no metrics endpoint. If you set `none` on a worker pod, you get no metrics from it.
 
 ### The ateom OTLP relay
 

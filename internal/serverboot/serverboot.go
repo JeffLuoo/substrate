@@ -26,12 +26,15 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"strings"
 	"sync/atomic"
 
 	"github.com/agent-substrate/substrate/internal/ateattr"
 	"github.com/agent-substrate/substrate/internal/contextlogging"
 	"github.com/google/uuid"
+	promclient "github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
+	prombridge "go.opentelemetry.io/contrib/bridges/prometheus"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/exporters/otlp/otlpmetric/otlpmetricgrpc"
@@ -198,10 +201,56 @@ func InitTracing(ctx context.Context, opts TracingOptions) (*sdktrace.TracerProv
 	return tp, nil
 }
 
+const metricsExporterEnv = "OTEL_METRICS_EXPORTER"
+
+// metricsExporter says whether a meter provider pushes over OTLP. It does not
+// affect the Prometheus reader of InitMetrics and InitMetricsBridged.
+type metricsExporter string
+
+const (
+	// metricsExporterOTLP sends to OTEL_EXPORTER_OTLP_ENDPOINT. It is the
+	// default, as in the OpenTelemetry environment variable spec.
+	metricsExporterOTLP metricsExporter = "otlp"
+	// metricsExporterNone stops the OTLP push, for a deployment that scrapes
+	// the Prometheus endpoints instead and would otherwise get each metric
+	// twice.
+	metricsExporterNone metricsExporter = "none"
+)
+
+// metricsExporterFromEnv reads OTEL_METRICS_EXPORTER. An unrecognized value
+// keeps otlp and logs, rather than failing startup over a telemetry setting.
+func metricsExporterFromEnv(ctx context.Context) metricsExporter {
+	value, isSet := os.LookupEnv(metricsExporterEnv)
+	resolved, err := resolveMetricsExporter(value, isSet)
+	if err != nil {
+		slog.WarnContext(ctx, "Invalid metrics exporter environment, keeping otlp",
+			slog.String("exporter", value),
+			slog.Any("err", err))
+	}
+	return resolved
+}
+
+// resolveMetricsExporter accepts otlp and none. Any error means otlp was kept.
+func resolveMetricsExporter(value string, isSet bool) (metricsExporter, error) {
+	value = strings.ToLower(strings.TrimSpace(value))
+	// Treat set-but-empty as unset: templated manifests can render empty env vars.
+	if !isSet || value == "" {
+		return metricsExporterOTLP, nil
+	}
+	switch metricsExporter(value) {
+	case metricsExporterOTLP:
+		return metricsExporterOTLP, nil
+	case metricsExporterNone:
+		return metricsExporterNone, nil
+	}
+	return metricsExporterOTLP, fmt.Errorf("unsupported %s %q", metricsExporterEnv, value)
+}
+
 // InitMetrics registers a global MeterProvider with both a Prometheus
 // reader (exposed via StartMetricsServer's /metrics handler) and an
 // OTLP periodic reader. No Producer option, unlike InitMetricsPushOnly: a bridged
 // registry would be served twice, here and on its own endpoint.
+// OTEL_METRICS_EXPORTER=none removes the OTLP reader.
 func InitMetrics(ctx context.Context, serviceName string) (*sdkmetric.MeterProvider, error) {
 	if serviceName == "" {
 		return nil, fmt.Errorf("serviceName is required")
@@ -210,16 +259,18 @@ func InitMetrics(ctx context.Context, serviceName string) (*sdkmetric.MeterProvi
 	if err != nil {
 		return nil, fmt.Errorf("create Prometheus metric exporter: %w", err)
 	}
-	return newMeterProvider(ctx, serviceName, false, nil, nil, promExporter)
+	return newMeterProvider(ctx, serviceName, metricsExporterFromEnv(ctx), false, nil, nil, promExporter)
 }
 
 // InitMetricsPushOnly is InitMetrics without the Prometheus reader, for binaries
-// that run no metrics HTTP server of their own (ateom, atecontroller): a pull
-// reader would collect into a registry nothing serves. producers put metrics
-// recorded outside the OTel SDK on the same push path; atecontroller bridges
-// controller-runtime's registry that way.
+// that run no metrics HTTP server of their own (ateom): a pull reader would
+// collect into a registry nothing serves. producers put metrics recorded outside
+// the OTel SDK on the same push path.
+//
+// With OTEL_METRICS_EXPORTER=none the provider has no reader, and records
+// nothing: that is what the variable asks for on a component with no endpoint.
 func InitMetricsPushOnly(ctx context.Context, serviceName string, producers ...sdkmetric.Producer) (*sdkmetric.MeterProvider, error) {
-	return newMeterProvider(ctx, serviceName, false, nil, producers)
+	return newMeterProvider(ctx, serviceName, metricsExporterFromEnv(ctx), false, nil, producers)
 }
 
 // InitMetricsPushOnlyVia is InitMetricsPushOnly with an explicit exporter
@@ -237,37 +288,70 @@ func InitMetricsPushOnly(ctx context.Context, serviceName string, producers ...s
 // TracingOptions.RelayCapable, implied rather than a parameter because only a
 // caller that has a relay to pass reaches for this function in the first place.
 func InitMetricsPushOnlyVia(ctx context.Context, serviceName string, conn *grpc.ClientConn, producers ...sdkmetric.Producer) (*sdkmetric.MeterProvider, error) {
-	return newMeterProvider(ctx, serviceName, true, conn, producers)
+	return newMeterProvider(ctx, serviceName, metricsExporterFromEnv(ctx), true, conn, producers)
 }
 
-func newMeterProvider(ctx context.Context, serviceName string, relayCapable bool, conn *grpc.ClientConn, producers []sdkmetric.Producer, extraReaders ...sdkmetric.Reader) (*sdkmetric.MeterProvider, error) {
+// PrometheusRegistry is a Prometheus registry that a server other than
+// StartMetricsServer serves.
+type PrometheusRegistry interface {
+	promclient.Registerer
+	promclient.Gatherer
+}
+
+// InitMetricsBridged is for a binary whose Prometheus registry has its own
+// endpoint (atecontroller: controller-runtime's registry, which the manager
+// serves). With OTLP export on, reg is bridged onto the push path and the OTel
+// instruments are pushed only. With OTEL_METRICS_EXPORTER=none, the OTel
+// instruments register on reg instead, so the registry's endpoint serves them
+// beside the metrics that were bridged before.
+func InitMetricsBridged(ctx context.Context, serviceName string, reg PrometheusRegistry) (*sdkmetric.MeterProvider, error) {
 	if serviceName == "" {
 		return nil, fmt.Errorf("serviceName is required")
 	}
-	expOpts := []otlpmetricgrpc.Option{
-		// GKE managed metrics doesn't support validating the TLS certs of the collector.
-		otlpmetricgrpc.WithInsecure(),
+	exporter := metricsExporterFromEnv(ctx)
+	if exporter == metricsExporterNone {
+		promExporter, err := prometheus.New(prometheus.WithRegisterer(reg))
+		if err != nil {
+			return nil, fmt.Errorf("create Prometheus metric exporter: %w", err)
+		}
+		return newMeterProvider(ctx, serviceName, exporter, false, nil, nil, promExporter)
 	}
-	if conn != nil {
-		// WithGRPCConn takes precedence over endpoint/credential options, so
-		// WithInsecure above is inert on this path.
-		expOpts = append(expOpts, otlpmetricgrpc.WithGRPCConn(conn))
-	}
-	otlpExporter, err := otlpmetricgrpc.New(ctx, expOpts...)
-	if err != nil {
-		return nil, fmt.Errorf("create OTLP metric exporter: %w", err)
+	bridge := prombridge.NewMetricProducer(prombridge.WithGatherer(reg))
+	return newMeterProvider(ctx, serviceName, exporter, false, nil, []sdkmetric.Producer{bridge})
+}
+
+// newMeterProvider attaches producers to the OTLP reader only, so exporter none
+// drops them with it.
+func newMeterProvider(ctx context.Context, serviceName string, exporter metricsExporter, relayCapable bool, conn *grpc.ClientConn, producers []sdkmetric.Producer, extraReaders ...sdkmetric.Reader) (*sdkmetric.MeterProvider, error) {
+	if serviceName == "" {
+		return nil, fmt.Errorf("serviceName is required")
 	}
 	res, err := newResource(ctx, serviceName, relayAttrs(relayCapable, conn)...)
 	if err != nil {
 		return nil, fmt.Errorf("create metric resource: %w", err)
 	}
-	readerOpts := make([]sdkmetric.PeriodicReaderOption, 0, len(producers))
-	for _, p := range producers {
-		readerOpts = append(readerOpts, sdkmetric.WithProducer(p))
-	}
-	opts := []sdkmetric.Option{
-		sdkmetric.WithResource(res),
-		sdkmetric.WithReader(sdkmetric.NewPeriodicReader(otlpExporter, readerOpts...)),
+	opts := []sdkmetric.Option{sdkmetric.WithResource(res)}
+	if exporter == metricsExporterNone {
+		slog.InfoContext(ctx, "OTLP metric export disabled", slog.String("exporter", string(exporter)))
+	} else {
+		expOpts := []otlpmetricgrpc.Option{
+			// GKE managed metrics doesn't support validating the TLS certs of the collector.
+			otlpmetricgrpc.WithInsecure(),
+		}
+		if conn != nil {
+			// WithGRPCConn takes precedence over endpoint/credential options, so
+			// WithInsecure above is inert on this path.
+			expOpts = append(expOpts, otlpmetricgrpc.WithGRPCConn(conn))
+		}
+		otlpExporter, err := otlpmetricgrpc.New(ctx, expOpts...)
+		if err != nil {
+			return nil, fmt.Errorf("create OTLP metric exporter: %w", err)
+		}
+		readerOpts := make([]sdkmetric.PeriodicReaderOption, 0, len(producers))
+		for _, p := range producers {
+			readerOpts = append(readerOpts, sdkmetric.WithProducer(p))
+		}
+		opts = append(opts, sdkmetric.WithReader(sdkmetric.NewPeriodicReader(otlpExporter, readerOpts...)))
 	}
 	for _, r := range extraReaders {
 		opts = append(opts, sdkmetric.WithReader(r))
