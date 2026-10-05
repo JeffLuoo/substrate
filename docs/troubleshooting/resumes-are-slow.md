@@ -3,64 +3,51 @@
 > Some documents call this a cold start. Substrate says **resume**, because the
 > usual path restores a snapshot. It does not boot the actor from nothing.
 
-## Context
+Start here when the activation of an actor that is not on a worker is slow, or
+fails. [requests-are-slow.md](requests-are-slow.md) sends you here when the
+request that did the resume was slow.
 
-A **resume** is the activation of an actor that is not on a worker. An actor is
-idle most of the time, and Substrate suspends it to release its worker. The
-next request must put the actor back on a worker before the actor can answer.
-The request waits for that. This is the `triggered` series of
-[requests-are-slow.md](requests-are-slow.md), measured from the other end.
+Read [How to read a step](README.md#how-to-read-a-step) first.
 
-Two states give a resume, and their cost is not the same:
+## How a resume works
 
-| State before | Where the snapshot is | Cost |
+An actor is idle most of the time, and Substrate suspends or pauses it to free
+its place on a worker. The next request must put the actor back on a worker
+before the actor can answer:
+
+1. The router asks ateapi to resume the actor, and parks the request.
+2. The scheduler in ateapi finds a worker with room.
+3. atelet on the node of that worker restores the snapshot of the actor, in
+   phases: it gets the snapshot, prepares the image and the sandbox, and asks
+   ateom to restore.
+4. ateom starts the actor in the sandbox, next to the other actors on that
+   worker.
+
+Where the snapshot is changes the cost:
+
+| Before the resume | Where the snapshot is | Cost |
 |---|---|---|
 | Paused | On the node VM. The resume accepts only a worker on that VM. | Low. No download. |
-| Suspended | In object storage (GCS or S3) | High. A download and an unpack. |
+| Suspended | In object storage, such as GCS or S3 | High. A download and an unpack. |
 
-`ate.snapshot.scope` also changes the cost. A `data` snapshot holds only the
-durable directories, thus the resume starts the containers again from the
-image and the actor pays its startup. A `full` snapshot also holds the memory
-of the guest.
-
-A pause also pins the actor: the resume that follows accepts only a worker on
-the node that holds the snapshot. Refer to
-[capacity-is-full.md](capacity-is-full.md) when a pinned actor waits while the
-pool has free workers.
-
-`ate.snapshot.kind` tells you which snapshot the resume read. The permitted
-values and their meaning are in the `registry.ate.snapshot` group of
-[the registry](../metrics/registry/metrics.yaml). One of them changes what you
-can query: a `boot` is a start from nothing, thus it is not a restore and the
-atelet restore histogram has no data for it.
-
-Two instruments measure a resume. They do not measure the same part:
-
-| Metric | Emitted by | What it covers |
-|---|---|---|
-| `ate.actor.lifecycle.operation.duration` with `ate.actor.operation.name="resume"` | ateapi | The full operation, with the scheduler. |
-| `ate.actor.restore.duration` | atelet | Only the part on the worker node. |
-
-If the ateapi number is much larger than the atelet `total` phase, the delay is
-before the handoff. Examine the scheduler in step 5, and read the blind spots.
-
-**Do not add the phases together.** The download occurs at the same time as the
-asset fetch and the OCI unpack. Each phase is an independent measurement. Use
-`total` as the denominator. A phase that did not start is absent. It is not
-zero.
-
-Each step gives the query in two forms. Refer to
-[the naming rules](README.md#the-names-on-your-backend) for which form your
-backend needs, and for the reasons a query can return nothing.
+The `registry.ate.snapshot` group of
+[the registry](../metrics/registry/metrics.yaml) says which snapshot a resume
+read, and what each restore phase covers. A boot is a start from nothing: it
+is not a restore, thus the restore instrument of atelet has no data for it.
 
 ---
 
-## Step 1. Confirm that the resume is the cause
+## Step 1. Where did the time of the resume go?
 
-Read the two numbers together. The top line is what the user paid. The bottom
-line is what the node used.
+**Signal:** three instruments that measure different parts of one resume.
 
-**Prometheus**
+| Instrument | Emitted by | What it covers |
+|---|---|---|
+| `atenet.router.route.duration`, for the request that did the resume | the router | What the user waited for, with the parking time. |
+| `ate.actor.lifecycle.operation.duration`, for the resume operation | ateapi | The full operation, with the scheduler. |
+| `ate.actor.restore.duration`, phase `total` | atelet | Only the work on the node. |
+
+**Query:**
 
 ```promql
 histogram_quantile(0.95, sum by (le) (
@@ -68,236 +55,41 @@ histogram_quantile(0.95, sum by (le) (
         ate_router_resume="triggered"}[5m])))
 
 histogram_quantile(0.95, sum by (le) (
+  rate(ate_actor_lifecycle_operation_duration_seconds_bucket{
+        ate_actor_operation_name="resume"}[5m])))
+
+histogram_quantile(0.95, sum by (le) (
   rate(ate_actor_restore_duration_seconds_bucket{
         ate_snapshot_phase="total"}[5m])))
 ```
 
-**Cloud Monitoring / GMP**
+**Read:** each number contains the next one.
 
-```promql
-histogram_quantile(0.95, sum by(le) (
-  rate({__name__="atenet.router.route.duration_bucket",
-        "ate.router.resume"="triggered"}[5m])))
+* Many resumes fail — go to step 2 first. A failure holds its timer until it
+  gives up, thus failures make the ateapi and the node numbers larger. The
+  router number counts only the resumes that completed.
+* The node time is most of the total — the node is the cause. Go to step 3.
+* The ateapi time is much larger than the node time — the time went to the
+  scheduler or to the store. Go to step 4 of
+  [capacity-is-full.md](capacity-is-full.md).
+* The router time is much larger than the ateapi time — the request waited in
+  the router. Go to step 3 of [requests-are-slow.md](requests-are-slow.md).
+* The node time is empty, and resumes occur — the resumes are boots, not
+  restores. The snapshot kind on the lifecycle instrument confirms it.
 
-histogram_quantile(0.95, sum by(le) (
-  rate({__name__="ate.actor.restore.duration_bucket",
-        "ate.snapshot.phase"="total"}[5m])))
-```
+**A quantile at the last bucket is not a value.** The instruments do not use
+the same buckets. A value at or near the end of the range means only that the
+true value is above the buckets, thus you cannot compare two numbers there.
+Read the mean instead: divide the increase of `_sum` by the increase of
+`_count`.
 
-**The restore histogram holds the failed restores too.** It has no key that
-marks a failure. A phase that fails holds its timer until it gives up, thus
-failures raise this number without any resume becoming slower. Read step 6
-before you trust it.
+## Step 2. Do the resumes fail?
 
-* The two numbers agree — the node is the cause. Go to step 2.
-* The router number is much larger — the time went to the queue or to the
-  scheduler. Go to step 5.
-* The `unknown` series of the router increases — the resumes fail. Go to
-  step 6 first.
-* The restore query is empty but resumes occur — the resumes are boots. Confirm
-  it with the query below.
+**Signal:** `error.type` on `ate.actor.lifecycle.operation.duration`. ateapi
+sets it only on an operation that failed, and it holds the gRPC status code.
+The restore instrument of atelet does not mark a failure.
 
-**A quantile at the last bucket is saturated.** The two instruments do not use
-the same buckets, and the router histogram ends before the restore histogram
-of atelet. A value at or near the end of either range means only that the true
-value is somewhere above the buckets, thus the two cannot be compared there.
-Read the mean instead, as step 2 does.
-
-**Prometheus**
-
-```promql
-sum by (ate_snapshot_kind) (
-  rate(ate_actor_lifecycle_operation_duration_seconds_count{
-        ate_actor_operation_name="resume"}[5m]))
-```
-
-**Cloud Monitoring / GMP**
-
-```promql
-sum by("ate.snapshot.kind") (
-  rate({__name__="ate.actor.lifecycle.operation.duration_count",
-        "ate.actor.operation.name"="resume"}[5m]))
-```
-
-## Step 2. Find the phase
-
-**Know the failure rate before you read the time.** A phase that fails holds
-its timer until it gives up. Thus a few failures make the phase look slow. If
-step 6 shows failures, the tail of this step is the failures, not slow
-restores.
-
-**Prometheus**
-
-```promql
-histogram_quantile(0.95, sum by (le, ate_snapshot_phase) (
-  rate(ate_actor_restore_duration_seconds_bucket[5m])))
-```
-
-**Cloud Monitoring / GMP**
-
-```promql
-histogram_quantile(0.95, sum by(le, "ate.snapshot.phase") (
-  rate({__name__="ate.actor.restore.duration_bucket"}[5m])))
-```
-
-**Read the mean as well.** These buckets are wide at the tail, thus a quantile
-in the last bucket is an interpolation that can be far above the true value:
-
-**Prometheus**
-
-```promql
-sum by (ate_snapshot_phase) (
-  increase(ate_actor_restore_duration_seconds_sum[30m]))
-/ sum by (ate_snapshot_phase) (
-  increase(ate_actor_restore_duration_seconds_count[30m]))
-```
-
-**Cloud Monitoring / GMP**
-
-```promql
-sum by("ate.snapshot.phase") (
-  increase({__name__="ate.actor.restore.duration_sum"}[30m]))
-/ sum by("ate.snapshot.phase") (
-  increase({__name__="ate.actor.restore.duration_count"}[30m]))
-```
-
-The `registry.ate.snapshot` group of
-[the registry](../metrics/registry/metrics.yaml) says what each phase covers.
-The slowest phase says where to go next:
-
-| Phase | Go to |
-|---|---|
-| `volume_mount` | The logs of atelet. |
-| `manifest_fetch`, `download` | Step 3. |
-| `oci_unpack`, `sandbox_assets` | Step 4. |
-| `ateom_restore` | The logs of ateom. |
-
-**Compare the count of each phase with the count of `total`.** atelet does not
-record a phase that did not start. Thus a phase with fewer samples than the
-phases before it shows where the restores stop. For example, if `download` has
-as many samples as `total` but `ateom_restore` has fewer, the restores reached
-the sandbox runtime and died there. Go to step 6. Make this comparison for one
-`ate.snapshot.kind` at a time, because a `local` restore has no download.
-
-## Step 3. Examine the snapshot and the storage
-
-A large snapshot makes a long download. Compare the templates.
-
-**Prometheus**
-
-```promql
-histogram_quantile(0.95, sum by (le, ate_template_name, file_name) (
-  rate(atelet_snapshot_size_bytes_bucket[1h])))
-```
-
-**Cloud Monitoring / GMP**
-
-```promql
-histogram_quantile(0.95, sum by(le, "ate.template.name", "file.name") (
-  rate({__name__="atelet.snapshot.size_bucket"}[1h])))
-```
-
-atelet records one measurement for each image file, not one for each
-checkpoint. Use `file.name` to compare the same type of image.
-
-```bash
-kubectl ate get actor-snapshots -a <atespace>
-```
-
-If the size did not change but the download did, the storage backend is the
-cause. Read step 6 for the failures.
-
-## Step 4. Examine the image cache on the node
-
-A miss adds a pull and an unpack to each resume.
-
-**Prometheus**
-
-```promql
-sum by (ate_imagecache_outcome) (
-  rate(ate_imagecache_requests_total[5m]))
-
-sum by (error_type) (
-  rate(ate_imagecache_requests_total{
-        ate_imagecache_outcome="error"}[5m]))
-```
-
-**Cloud Monitoring / GMP**
-
-```promql
-sum by("ate.imagecache.outcome") (
-  rate({__name__="ate.imagecache.requests"}[5m]))
-
-sum by("error.type") (
-  rate({__name__="ate.imagecache.requests",
-        "ate.imagecache.outcome"="error"}[5m]))
-```
-
-Calculate the hit ratio as `hit / (hit + miss)`. Keep the outcomes that are not
-a lookup result out of the denominator. The
-`registry.ate.imagecache` group of
-[the registry](../metrics/registry/metrics.yaml) lists them.
-
-Only the `error` outcome carries `error.type`, which holds the HTTP status that
-the registry of the image returned. Group by it to divide a credential fault
-from a rate limit from a fault of the registry. The permitted values are on
-`metric.ate.imagecache.requests` in the same file.
-
-## Step 5. Examine the control plane
-
-Use this step only if step 1 sent you here.
-
-**Prometheus**
-
-```promql
-sum by (ate_scheduler_outcome) (
-  rate(ate_scheduler_assignment_duration_seconds_count[5m]))
-
-histogram_quantile(0.95, sum by (le) (
-  rate(ate_scheduler_assignment_duration_seconds_bucket{
-        ate_scheduler_outcome="assigned"}[5m])))
-```
-
-**Cloud Monitoring / GMP**
-
-```promql
-sum by("ate.scheduler.outcome") (
-  rate({__name__="ate.scheduler.assignment.duration_count"}[5m]))
-
-histogram_quantile(0.95, sum by(le) (
-  rate({__name__="ate.scheduler.assignment.duration_bucket",
-        "ate.scheduler.outcome"="assigned"}[5m])))
-```
-
-* The outcome is `no_capacity` — this is a capacity fault, not a resume
-  fault. Read [capacity-is-full.md](capacity-is-full.md).
-* The outcome is `assigned` but the time is large — a delay in the store. The
-  store has no metrics. Read the logs of ateapi.
-
-The user also pays the parking time with the resume time:
-
-**Prometheus**
-
-```promql
-histogram_quantile(0.95, sum by (le, outcome) (
-  rate(atenet_router_parking_wait_duration_seconds_bucket[5m])))
-```
-
-**Cloud Monitoring / GMP**
-
-```promql
-histogram_quantile(0.95, sum by(le, outcome) (
-  rate({__name__="atenet.router.parking.wait.duration_bucket"}[5m])))
-```
-
-## Step 6. Find out if the resumes fail
-
-A failed resume is not the same fault as a slow resume, but a failure also
-makes the phase look slow, thus read this step together with step 2. The
-restore histogram of atelet does not mark a failure. The lifecycle histogram
-of ateapi does: `error.type` is present only on an operation that failed.
-
-**Prometheus**
+**Query:**
 
 ```promql
 sum by (ate_template_name, error_type) (
@@ -309,135 +101,156 @@ sum by (ate_template_name) (
         ate_actor_operation_name="resume"}[5m]))
 ```
 
-**Cloud Monitoring / GMP**
+The result is the fraction of the resumes of each template that failed.
 
-```promql
-sum by("ate.template.name", "error.type") (
-  rate({__name__="ate.actor.lifecycle.operation.duration_count",
-        "ate.actor.operation.name"="resume", "error.type"!=""}[5m]))
-/ ignoring("error.type") group_left
-sum by("ate.template.name") (
-  rate({__name__="ate.actor.lifecycle.operation.duration_count",
-        "ate.actor.operation.name"="resume"}[5m]))
-```
+**Read:** the status code tells you the class of the failure, not the
+component. To find the component, find where the restores stop. atelet does
+not record a phase that did not start. Thus compare the count of each restore
+phase with the count of `total`, for one snapshot kind at a time:
 
-The result is the fraction of the resumes of each template that failed, for
-each gRPC status code. The code tells you the class of the failure, not the
-component. Use step 2 to find the phase where the restores stop, and then read
-the logs of that component:
-
-| Phase where the restores stop | Examine |
+| Where the restores stop | Examine |
 |---|---|
-| `manifest_fetch`, `download` | The storage backend, and the URL of the snapshot object. The logs of atelet. |
-| `volume_mount`, `oci_unpack`, `sandbox_assets` | The node. The logs of atelet. |
-| `ateom_restore` | The sandbox runtime. The logs of ateom. |
-| No phase, only `total` or nothing | The failure occurred before the work reached the node. The logs of ateapi. |
+| Before any phase on the node | ateapi. Read its logs. |
+| While atelet gets the snapshot | The storage backend, and the URL of the snapshot. The logs of atelet. |
+| While atelet prepares the image or the sandbox | The node. The logs of atelet. |
+| In the restore by ateom | The sandbox runtime. The logs of ateom. |
 
-A slow resume and a failed suspend are related. A suspend that fails leaves no
-good snapshot for the next resume. Read the crash counter and the checkpoint
-phases:
-
-**Prometheus**
-
-```promql
-sum by (ate_actor_operation_name, ate_template_name) (
-  rate(ate_actor_crashes_total[5m]))
-
-histogram_quantile(0.95, sum by (le, ate_snapshot_phase) (
-  rate(ate_actor_checkpoint_duration_seconds_bucket[5m])))
-```
-
-**Cloud Monitoring / GMP**
-
-```promql
-sum by("ate.actor.operation.name", "ate.template.name") (
-  rate({__name__="ate.actor.crashes"}[5m]))
-
-histogram_quantile(0.95, sum by(le, "ate.snapshot.phase") (
-  rate({__name__="ate.actor.checkpoint.duration_bucket"}[5m])))
-```
-
-`ate.actor.operation.name` on the crash counter tells you which operation lost
-the actor. The `ate.actor.crashed` event in
+A failed suspend also makes the next resume fail, because it leaves no good
+snapshot. `ate.actor.crashes` counts the actors that Substrate lost, by the
+operation that lost them. The `ate.actor.crashed` event in
 [`events.yaml`](../metrics/registry/events.yaml) names the actor, which no
-metric label may.
+metric label may. `ate.actor.checkpoint.duration` shows the phases of a
+suspend.
 
-## Step 7. Examine the load on the node
+## Step 3. Which phase on the node is slow?
 
-A node with no free memory or no free CPU makes each resume slow. One worker
-holds many actors, thus a resume shares the CPU and the memory of its worker
-with the actors that are already there. A busy actor makes the resume of its
-neighbors slow. The scheduler does not prevent this: it compares the limits of
-the actors with the capacity of the worker, not what the actors use.
+**Signal:** the phases of `ate.actor.restore.duration`. The
+`registry.ate.snapshot` group says what each phase covers.
 
-**Prometheus**
+**Query:**
 
 ```promql
-sum by (ate_template_name, ate_stats_source) (
+sum by (ate_snapshot_kind, ate_snapshot_phase) (
+  increase(ate_actor_restore_duration_seconds_sum[30m]))
+/ sum by (ate_snapshot_kind, ate_snapshot_phase) (
+  increase(ate_actor_restore_duration_seconds_count[30m]))
+```
+
+This query gives the mean, because the buckets are wide at the tail.
+
+**Do not add the phases together.** Some phases occur at the same time. Use
+`total` as the denominator.
+
+**Read:** the slowest phase says where to go next.
+
+* atelet gets the snapshot slowly — go to step 4.
+* atelet prepares the image slowly — go to step 5.
+* atelet prepares the sandbox slowly, or ateom restores slowly — go to step 6,
+  and read the logs of ateom.
+* atelet mounts the volumes slowly — read the logs of atelet.
+
+## Step 4. Is the snapshot large, or the storage slow?
+
+**Signal:** `atelet.snapshot.size`, which records the size of each image file
+that a checkpoint writes.
+
+**Query:**
+
+```promql
+histogram_quantile(0.95, sum by (le, ate_template_name, file_name) (
+  rate(atelet_snapshot_size_bytes_bucket[1h])))
+```
+
+Compare the same file name across the templates, and across time.
+
+**Read:**
+
+* The snapshots of a template became larger — the download takes longer
+  because the snapshot is larger. Examine what the actor keeps in memory and
+  on disk.
+* The size did not change, but the download did — the storage backend is the
+  cause.
+
+## Step 5. Does the image cache on the node miss?
+
+**Signal:** `ate.imagecache.requests`. The `registry.ate.imagecache` group
+says what each outcome means.
+
+**Query:**
+
+```promql
+sum by (ate_imagecache_outcome, error_type) (
+  rate(ate_imagecache_requests_total[5m]))
+```
+
+**Read:**
+
+* Many misses — each miss adds a pull and an unpack to the resume. Calculate
+  the hit ratio as `hit / (hit + miss)`. Do not put the failures in the
+  denominator.
+* Many failures — `error.type` holds the HTTP status that the image registry
+  returned. It tells a credential fault from a rate limit from a fault of the
+  registry.
+
+## Step 6. Is the worker or the node busy?
+
+**Signal:** the actor stats instruments of atelet, such as
+`ate.actor.stats.memory.working_set`, `ate.actor.stats.cpu.time`, and
+`ate.actor.stats.sampled_actors`. The `registry.ate.stats` group says what
+each source measures.
+
+**Query:**
+
+```promql
+sum by (ate_workerpool_name, ate_template_name, ate_stats_source) (
   ate_actor_stats_memory_working_set_bytes)
 
-sum by (ate_template_name, ate_stats_source) (
+sum by (ate_workerpool_name, ate_template_name, ate_stats_source) (
   rate(ate_actor_stats_cpu_time_seconds_total[5m]))
-
-ate_actor_stats_sampled_actors
 ```
 
-**Cloud Monitoring / GMP**
+**Group by the source, and do not add the sources together.** They measure
+different things.
 
-```promql
-sum by("ate.template.name", "ate.stats.source") (
-  {__name__="ate.actor.stats.memory.working_set"})
+**Use `sum` across the nodes.** Each atelet measures only the actors on its
+own node. This is the opposite of `ate.workerpool.workers` in
+[capacity-is-full.md](capacity-is-full.md), where each replica of ateapi
+reports the whole fleet. Read who emits an instrument before you choose the
+operator.
 
-sum by("ate.template.name", "ate.stats.source") (
-  rate({__name__="ate.actor.stats.cpu.time"}[5m]))
+**Read:** one worker holds many actors, thus a resume shares the CPU and the
+memory of its worker with the actors that are already there.
 
-{__name__="ate.actor.stats.sampled_actors"}
-```
-
-Group the data by `ate.stats.source`. Do not add the sources together. The
-`cgroup` source includes the load of the sandbox runtime. The `guest-agent`
-source includes only the containers of the workload.
-
-**Add these across the nodes with `sum`.** Each atelet measures only the actors
-on its own node, thus one series for each node, and the sum is the fleet. This
-is the opposite of `ate.workerpool.workers`, where each ateapi reports the whole
-fleet and a sum multiplies it. Read the emitter before you choose the operator:
-
-| Metric | Emitter | Each series covers | Operator |
-|---|---|---|---|
-| `ate.actor.stats.*` | atelet, one for each node | One node | `sum` |
-| `ate.workerpool.workers` | ateapi, some replicas | The whole fleet | `max` |
-
-The pool keys are absent when the atelet DaemonSet does not set `NODE_NAME`
-through the Downward API. The samples still flow; they carry no
-`ate.workerpool.*`.
-
-Use `working_set` against a memory limit. The `usage` value includes the page
-cache that the node can release. `sampled_actors` is the denominator: if it
-decreases but the number of actors does not, the sweep cannot measure some
-actors.
+* The actors on the worker use most of its CPU or memory — a busy neighbor
+  makes the resume slow. The scheduler does not prevent this: it compares the
+  limits of the actors with the capacity of the worker, not what the actors
+  use.
+* The number of measured actors decreases, but the number of actors does not
+  — the sweep cannot measure some actors. Read the logs of atelet.
 
 ```bash
 kubectl ate top workers
-kubectl logs -n ate-system <atelet-pod>
 ```
 
 ---
 
 ## The blind spots of this scenario
 
-| Area | Effect on a slow resume |
-|---|---|
-| The store in ateapi | A delay looks like unmeasured time in the lifecycle and the assignment histograms. |
-| The worker cache in ateapi | An old view of the fleet gives a worker that is not in operation. This looks like a resume failure with no cause. |
-| The eviction of the image cache | You see the hits and the misses, but not the disk pressure from the layer pool. |
-| The build of a golden image | Nothing measures it. A slow first activation of a new template has no data. |
+* **The store in ateapi.** A delay looks like unmeasured time in the lifecycle
+  and the scheduler instruments.
+* **The build of a golden snapshot.** Nothing measures it. A slow first
+  activation of a new template has no data.
+* **The eviction of the image cache.** You see the hits and the misses, but
+  not the disk pressure.
 
-## Move from a template to an actor
+The full list is in `blind_spots` of
+[`docs/metrics/substrate.yaml`](../metrics/substrate.yaml).
 
-No resume metric has the name, the UID, or the atespace of an actor. The
-cardinality rules forbid these keys. When the metrics give you a slow template,
-use the logs and the traces to find the actor:
+## Go from a template to one actor
+
+No resume metric names an actor. The cardinality rules forbid it. When the
+metrics give you a slow template, use the logs and the traces to find the
+actor:
 
 ```bash
 kubectl ate get actors -a <atespace>

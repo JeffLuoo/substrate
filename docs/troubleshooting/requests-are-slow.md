@@ -1,129 +1,97 @@
 # Requests are slow or return 503
 
-## Context
+Start here when a client of an actor waited too long, or got a 503 error. The
+requests are the **data-plane requests of the workload**: the HTTP or gRPC
+calls that a client sends to the address of the actor. A slow `kubectl ate`
+command is a different subject. It goes to ateapi, thus read
+`rpc.server.call.duration` in step 4.
 
-The requests are the **data-plane requests of the workload**. They are the HTTP
-or gRPC calls that a client sends to the address of the actor:
+Read [How to read a step](README.md#how-to-read-a-step) first.
 
-```
-<actor-name>.<atespace>.actors.resources.substrate.ate.dev
-```
-
-They are not `kubectl ate` commands. Those go to ateapi. Use
-`rpc.server.call.duration` for a slow command.
+## What the router measures
 
 `atenet.router.route.duration` measures only the decision of the router: from
 the moment Envoy gives the request to the router, to the moment the router
 gives the worker endpoint back. It does **not** include the work of the actor,
-and it does not include the response.
+and it does not include the response. Thus compare it with what the client
+saw:
 
-| The client is slow | The router metric | Where the cause is |
+| The client is slow | The router time | Where the cause is |
 |---|---|---|
 | Yes | Large | In Substrate. Use the steps below. |
-| Yes | Small | In the code of the actor, or in the network. Read the logs of the actor. |
+| Yes | Small | In the code of the actor, or in the network. Go to step 5. |
 | No | Large | Somebody waited, but not this client. For example, an operator did a resume. |
 
-Four outcomes reach the client, and three of them are a 503 error:
-
-| What the client sees | Label | Cause |
-|---|---|---|
-| A slow but correct response | `ate.router.resume="triggered"` | The actor was not on a worker. The request paid for the resume. |
-| `503 no free workers available` | `ate.router.outcome="no_capacity"` | The park budget ended and no worker had room. |
-| `503 router at capacity` | `ate.router.outcome="unavailable"`, and `parking.rejected` increases | The parking area is full. The router sheds the request without a wait. |
-| A 503 error with no capacity pressure | `ate.router.outcome="resume_error"` | A defect. Examine the router and ateapi. |
-
-**`no_capacity` means only that no worker had room.** The router reports it
-only when ateapi returns `ResourceExhausted`. A full parking area is
-`unavailable`, together with other causes, such as a denied egress request or
-a failed policy lookup. `parking.rejected` tells the full parking area apart
-from the other causes, and step 3 reads it. A full fleet and a full parking
-area need opposite work: a full fleet needs more workers, a full parking area
-needs a larger lot or a shorter resume.
-
-**Parking** is why a full fleet does not immediately give an error. The router
-holds the request and does the resume again with a backoff. Refer to
-[request-parking.md](../request-parking.md). The router also puts the requests
-for the **same** actor into one resume. Thus 50 requests on one cold actor make
-one `triggered` sample and 49 `joined` samples. Do not read `joined` as 50 slow
-activations.
-
-Each step gives the query in two forms. Refer to
-[the naming rules](README.md#the-names-on-your-backend) for which form your
-backend needs, and for the reasons a query can return nothing.
+When an actor is not on a worker, the router asks ateapi to resume it. While
+the resume is in progress, the router **parks** the request: it holds the
+request and tries again with a backoff. The router puts the requests for the
+same actor into one resume. Refer to
+[request-parking.md](../request-parking.md).
 
 ---
 
-## Step 1. Find the outcome
+## Step 1. Did the router find a worker?
 
-**Prometheus**
+**Signal:** the outcome on `atenet.router.route.duration`. The
+`registry.ate.router` group of [the registry](../metrics/registry/metrics.yaml)
+says what each outcome means.
+
+**Query:**
 
 ```promql
 sum by (ate_router_outcome) (
   rate(atenet_router_route_duration_seconds_count[5m]))
 ```
 
-**Cloud Monitoring / GMP**
+**Read:**
 
-```promql
-sum by("ate.router.outcome") (
-  rate({__name__="atenet.router.route.duration_count"}[5m]))
-```
+* The router found the endpoint, and the request was slow — go to step 2.
+* The router found the endpoint, and the client still got an error — the fault
+  is after the router. Envoy could not use the endpoint, or the actor failed.
+  Go to step 5. The outcome `ok` means only that the router found an endpoint.
+* No worker had room for the actor (`no_capacity`) — go to
+  [capacity-is-full.md](capacity-is-full.md).
+* The router did not find the endpoint for a different reason — go to step 3.
+  The router can shed a request because its parking area is full, and step 3
+  shows it. For each other outcome, the registry names the cause.
+* The client stopped, or the time limit ended — go to step 2 to see how long
+  the request waited.
 
-| Outcome | Go to |
-|---|---|
-| `no_capacity` | [capacity-is-full.md](capacity-is-full.md). |
-| `unavailable` | Step 3. It tells you whether the parking area is full. If it is not, read the logs of the router. |
-| `resume_error` | Step 3, and then the logs of ateapi. |
-| `ok` but slow | Step 2. |
-| `ok`, but the client got an error | The fault is after the boundary of the router. The router found the endpoint and Envoy could not use it. Go to step 5. |
-| `timeout` | The deadline of the request itself ended, or ateapi did not answer. This is **not** the park budget: an ended budget reports the condition that blocked the resume, which is usually `no_capacity`. Go to step 4. |
-| `cancelled` | The client gave up. Read step 2 to find how long it waited. |
+## Step 2. Was the request a warm route or a resume?
 
-`ok` on this metric means only that the router found an endpoint. It does not
-mean that the client got an answer.
+**Signal:** the resume state on `atenet.router.route.duration`, in the same
+`registry.ate.router` group.
 
-The table above holds the outcomes that send you to a different step. The
-router has more, and the `registry.ate.router` group of
-[the registry](../metrics/registry/metrics.yaml) lists each one. An outcome
-that is not in the table names its own cause; read it there and then go to
-step 4.
-
-## Step 2. Divide the warm route from the resume
-
-**Keep both `ate.router.outcome` and `ate.router.resume` in the `by()` clause.**
-If you remove the resume key, the aggregation adds the warm route to the
-activation. A warm route is milliseconds and an activation is hundreds of
-milliseconds or more, thus one distribution then holds both and the merged
-number describes neither. The outcome tells you which failed requests are in
-the `unknown` series.
-
-**Prometheus**
+**Query:**
 
 ```promql
 histogram_quantile(0.95, sum by (le, ate_router_outcome, ate_router_resume) (
   rate(atenet_router_route_duration_seconds_bucket[5m])))
 ```
 
-**Cloud Monitoring / GMP**
+**Keep the resume state in the `by()` clause.** A warm route is milliseconds
+and a resume is hundreds of milliseconds or more. A query that adds them
+together gives a number that describes neither.
 
-```promql
-histogram_quantile(0.95, sum by(le, "ate.router.outcome", "ate.router.resume") (
-  rate({__name__="atenet.router.route.duration_bucket"}[5m])))
-```
+**Read:**
 
-The router sets `none`, `triggered` and `joined` only for a resume that
-completed. Each request whose resume did not complete is `unknown`.
+* The actor was already on a worker (the warm route), and the time is large —
+  the router itself is slow. Go to step 3 and step 4.
+* This request did the resume — the resume is the cost. Go to
+  [resumes-are-slow.md](resumes-are-slow.md).
+* This request waited for the resume of a different request — count these
+  with the resume that they waited for, not as separate resumes. One resume
+  with 50 requests is one slow resume, not 50.
+* The resume did not complete — this time is not a resume time. Read the
+  outcome of the same series, and go to step 3.
 
-| Series | Meaning | Next |
-|---|---|---|
-| `none` | The warm route. The actor was already in operation. This must stay in milliseconds. | If it is slow, go to step 3. |
-| `triggered` | This request did the resume. Its time is the activation time. | [resumes-are-slow.md](resumes-are-slow.md). |
-| `joined` | This request waited for the resume of a different request. Do not count these as separate activations. | [resumes-are-slow.md](resumes-are-slow.md), from the `triggered` series. |
-| `unknown` | The resume failed, the client stopped, the router shed the request, or the request was egress. Its time is not an activation time. | Read the outcome of the same series, then step 3 and step 4. |
+## Step 3. Did the router park or shed the request?
 
-## Step 3. Examine the queue in the router
+**Signal:** the parking instruments of the router:
+`atenet.router.parking.active`, `atenet.router.parking.rejected` and
+`atenet.router.parking.wait.duration`.
 
-**Prometheus**
+**Query:**
 
 ```promql
 atenet_router_parking_active
@@ -134,42 +102,29 @@ histogram_quantile(0.95, sum by (le, outcome) (
   rate(atenet_router_parking_wait_duration_seconds_bucket[5m])))
 ```
 
-**Cloud Monitoring / GMP**
+**Read:**
 
-```promql
-{__name__="atenet.router.parking.active"}
+* Requests are rejected — the parking area is full, and the router sheds the
+  requests without a wait. Make the parking area larger, or make the resumes
+  faster with [resumes-are-slow.md](resumes-are-slow.md). More workers do not
+  help a shed request. [request-parking.md](../request-parking.md) names the
+  flag and its default.
+* No requests are rejected, and the wait is long — the requests waited for a
+  resume. The outcome of the wait says why it ended. A wait that ended because
+  the budget ended means that capacity, not a fault, blocked the resume. Go to
+  [capacity-is-full.md](capacity-is-full.md).
+* No requests are rejected, and the wait is short — the router did not hold
+  the request. Go to step 4, and read the logs of the router.
 
-sum(rate({__name__="atenet.router.parking.rejected"}[5m]))
+An absent rejection series counts as zero: a counter appears only after its
+first increase.
 
-histogram_quantile(0.95, sum by(le, outcome) (
-  rate({__name__="atenet.router.parking.wait.duration_bucket"}[5m])))
-```
+## Step 4. Is a component of the control plane slow?
 
-**This step tells a full parking area apart from the other `unavailable`
-causes.**
+**Signal:** the gRPC instruments: `rpc.server.call.duration` on the server
+side of a call, and `rpc.client.call.duration` on the client side.
 
-| `parking.rejected` | Meaning | Next |
-|---|---|---|
-| Zero | The parking area had room. The `unavailable` requests have a different cause. | The logs of the router. |
-| Above zero | The parking area is full. The router shed the requests without a wait. | Make the lot larger with `--parked-request-max`, or make the resume faster with [resumes-are-slow.md](resumes-are-slow.md). Growing the pool does not help a shed request. |
-
-An absent `parking.rejected` series counts as zero: the counter appears only
-after its first increase.
-
-* `parking.active` near the configured maximum means that the parking area is
-  almost full. `--parked-request-max` sets it. Refer to
-  [request-parking.md](../request-parking.md) for the flag and its default.
-* The `outcome` label on the wait histogram does not start with `ate.`. This is
-  a known exception in `docs/metrics/substrate.yaml`. Its permitted values are
-  in the `registry.ate.deviation` group of
-  [the registry](../metrics/registry/metrics.yaml).
-
-A value of `budget_exhausted` below the full budget is normal. The budget is
-per flight. A request that joins a flight late shares the remaining budget.
-
-## Step 4. Find out if a component is slow
-
-**Prometheus**
+**Query:**
 
 ```promql
 histogram_quantile(0.95, sum by (le, rpc_method) (
@@ -179,54 +134,36 @@ histogram_quantile(0.95, sum by (le, rpc_method) (
   rate(rpc_client_call_duration_seconds_bucket[5m])))
 ```
 
-**Cloud Monitoring / GMP**
+**Read:** compare the two for the same method.
 
-```promql
-histogram_quantile(0.95, sum by(le, "rpc.method") (
-  rate({__name__="rpc.server.call.duration_bucket"}[5m])))
+* The server time is large — the handler is slow. Read the logs of that
+  component.
+* The client time is much larger than the server time — the delay is not in
+  the handler. It is in the network or in a queue.
 
-histogram_quantile(0.95, sum by(le, "rpc.method") (
-  rate({__name__="rpc.client.call.duration_bucket"}[5m])))
-```
+## Step 5. Is the actor the cause?
 
-Compare the two for the same method. If the client number is much larger than
-the server number, the delay is not in the handler. It is in the network or in
-a queue.
-
-## Step 5. Read the actor
+**Signal:** none. No Substrate metric measures the work of the actor. Read its
+logs.
 
 ```bash
 kubectl ate get actors -a <atespace>
 kubectl ate logs actors <actor-name> -a <atespace> -f
 ```
 
-If the route duration is small but the client is slow, the cause is here. No
-Substrate metric covers the work of the actor.
-
 An actor can run more than one container. `--container`, or `-c`, keeps only
-the lines of the named container:
-
-```bash
-kubectl ate logs actors <actor-name> -a <atespace> -c <container-name>
-```
-
-Two things to know before you use it:
-
-* **It also removes the lifecycle records.** `Actor started`, `Actor restored`
-  and the others are about the actor, thus no container produced them and no
-  container name selects them. Read the logs without `-c` when you need the
-  lifecycle of the actor together with its output.
-* **A name that does not match gives no output and no error.** The command ends
-  with status 0 and an empty result, which looks the same as a silent actor.
-  Take the container names from the ActorTemplate.
+the lines of the named container. It also removes the lifecycle records of the
+actor, because no container wrote them. A name that does not match gives no
+output and no error. Take the container names from the ActorTemplate.
 
 ---
 
 ## The blind spots of this scenario
 
-| Area | Effect |
-|---|---|
-| The work of the actor and the response | Outside the route duration. No metric. |
-| atenet-dns | No instruments. If a reload fails, the answers stay old and no signal shows it. |
-| The shutdown of the router | Nothing counts a drain that ends with an error. |
-| The store in ateapi | A delay looks like unmeasured time inside a resume. |
+* **The work of the actor and the response.** They are outside the route time.
+  No metric measures them.
+* **atenet-dns.** If it gives old answers, no signal shows it.
+* **The store in ateapi.** A delay looks like unmeasured time inside a resume.
+
+The full list is in `blind_spots` of
+[`docs/metrics/substrate.yaml`](../metrics/substrate.yaml).
