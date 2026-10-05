@@ -275,14 +275,25 @@ component name as the scope (`"atelet"`, `"ateapi"`, `"atecontroller"`):
 * A package constructed once in `main` takes a `*Instruments` built there
   (`cmd/atelet`).
 
-The meter provider itself is set up once per binary by
-`serverboot.InitMetrics` (Prometheus reader plus OTLP push),
-`serverboot.InitMetricsBridged` (OTLP push with a foreign Prometheus registry
-bridged onto it, or that registry alone under `OTEL_METRICS_EXPORTER=none`;
-atecontroller), or `serverboot.InitMetricsPushOnlyVia` (OTLP push only, over
-the atelet relay when given one; ateom).
-A new component calls one of these and defers `ShutdownProvider`; a new package
-inside an existing component adds nothing there.
+The meter provider itself is set up once per binary. Every component pushes
+over OTLP by default, and every component that runs an HTTP server also serves
+`/metrics` for an optional scrape (see
+[How a component emits metrics](../../observability.md#how-a-component-emits-metrics)).
+A new component calls the one function that matches it, and defers
+`ShutdownProvider`:
+
+* `serverboot.InitMetrics`, plus `serverboot.StartMetricsServer` for
+  `/metrics`, `/readyz` and `/healthz`: the default for a component with its
+  own HTTP server (ateapi, atelet, atenet-router, the credential provider).
+* `serverboot.InitMetricsBridged`: for a component whose endpoint serves a
+  Prometheus registry that it does not own (atecontroller, which serves
+  controller-runtime's). With OTLP it bridges that registry onto the push;
+  under `OTEL_METRICS_EXPORTER=none` it serves the OTel instruments from that
+  registry.
+* `serverboot.InitMetricsPushOnlyVia`: for a component that cannot serve an
+  endpoint (ateom). It pushes only, over the atelet relay when given one.
+
+A new package inside an existing component adds nothing there.
 
 ### Observable instruments
 

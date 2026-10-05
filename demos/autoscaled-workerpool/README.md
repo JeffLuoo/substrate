@@ -30,10 +30,13 @@ currently full, using a Kubernetes HorizontalPodAutoscaler (HPA) fed by the
 ## Architecture (kind)
 
 ```
-ate-api-server :9090/metrics          (ate_workerpool_workers, OTel -> Prometheus gauge)
-        │  scrape (prometheus.io/scrape annotation, 15s)
+ate-api-server                        (ate.workerpool.workers)
+        │  OTLP push (OTEL_METRIC_EXPORT_INTERVAL, 10s on kind)
         ▼
-Prometheus                            manifests/ate-install/monitoring/prometheus.yaml
+opentelemetry-collector :8889         (ate_workerpool_workers, Prometheus gauge)
+        │  scrape (otel-collector job, 15s)
+        ▼
+Prometheus                            manifests/ate-install/kind/prometheus.yaml
         │  PromQL
         ▼
 prometheus-adapter                    demos/autoscaled-workerpool/prometheus-adapter.yaml

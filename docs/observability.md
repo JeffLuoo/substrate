@@ -233,7 +233,7 @@ labels."ate.actor.uid"="8f2a…" AND jsonPayload.msg="Actor usage sample"
 
 ## 2. Metrics
 
-Agent Substrate emits foundational OpenTelemetry system and server metrics to monitor the overall health and performance of the control plane services. Every metric below is emitted by a service binary over OTLP and is **independent of the deployment** — a Kind dev cluster gets the same instruments as production; only the backend differs (see [Where Telemetry Goes](#4-where-telemetry-goes)).
+Agent Substrate emits foundational OpenTelemetry system and server metrics to monitor the overall health and performance of the control plane services. Every metric below is emitted by a service binary over OTLP and is **independent of the deployment** — a Kind dev cluster gets the same instruments as production; only the backend differs (see [Where Telemetry Goes](#4-where-telemetry-goes)). The push is the default path. A scrape is optional; see [How a component emits metrics](#how-a-component-emits-metrics).
 
 > [`docs/metrics/registry/metrics.yaml`](metrics/registry/metrics.yaml) defines each instrument. Read it when you need all the labels, the bucket limits, or the permitted values of a label. The table below does not have each instrument. The request-parking instruments and the actor resource-usage instruments (`ate.actor.stats.*`) are in the registry only. Refer to [The metric registry](#the-metric-registry); per-actor usage detail is the [events channel](#per-actor-usage-events)'s job.
 
@@ -319,7 +319,7 @@ Weaver permits only `groups` and `imports` at the top level of a registry file, 
 
 ### Bridged controller-runtime metrics (atecontroller)
 
-atecontroller bridges controller-runtime's private Prometheus registry, which the manager serves on an unscraped `:8080`, onto its OTLP reader. So `controller_runtime_*`, `workqueue_*`, `certwatcher_*`, `rest_client_*`, `leader_election_*`, `go_*`, and `process_*` reach the collector too, keeping their Prometheus names because they are upstream instruments and renaming them would break existing controller-runtime dashboards.
+atecontroller bridges controller-runtime's private Prometheus registry, which the manager serves on `:8080`, onto its OTLP reader. So `controller_runtime_*`, `workqueue_*`, `certwatcher_*`, `rest_client_*`, `leader_election_*`, `go_*`, and `process_*` reach the collector too, keeping their Prometheus names because they are upstream instruments and renaming them would break existing controller-runtime dashboards.
 
 These can be used to answer whether the controller is keeping up, e.g. rising `workqueue_depth` or `workqueue_queue_duration_seconds` means reconciles are falling behind, and `controller_runtime_reconcile_errors_total` says which controller.
 
@@ -329,9 +329,30 @@ Note that controller-runtime enables native histograms on `controller_runtime_re
 
 A queue that has never processed an item bridges as an exponential histogram with no positive buckets, which the Telemetry API (the Cloud Monitoring OTLP endpoint) rejects on ingest. atecontroller gives each such data point one positive bucket with a count of 0 before the OTLP push (`cmd/atecontroller/metrics.go`), so an idle queue no longer causes an error every tick. The padding carries no observations, so other backends are unaffected.
 
-### Scraping instead of pushing
+### How a component emits metrics
 
-ateapi, atelet, atenet-router and the credential provider also serve every instrument on their Prometheus `/metrics` endpoint. A cluster that scrapes those endpoints sets `OTEL_METRICS_EXPORTER=none` on the components, so each series reaches the backend once. With `none` the components install no OTLP metric reader and keep the Prometheus one; traces and logs are unaffected. atecontroller then registers its instruments (`ate.workerpool.*`) on controller-runtime's registry, so the manager's `:8080` serves them next to the controller-runtime families. ateom serves no endpoint of its own, so leave the variable unset on the worker pods, or it exports no metrics at all. The variable accepts `otlp` (the default) and `none`, the same values as `OTEL_LOGS_EXPORTER`; any other value logs a warning and keeps the OTLP export.
+Every component pushes its metrics over OTLP by default. This is the default path, and it is the same in every environment. An operator can also scrape a component. This is the optional path.
+
+| Component | OTLP push | Prometheus endpoint |
+|---|---|---|
+| ateapi, atelet, atenet-router, credential provider | yes | `/metrics` on `:9090` |
+| atecontroller | yes | `/metrics` on `:8080` (see the exceptions below) |
+| ateom-gvisor, ateom-microvm | yes, through the [atelet relay](#the-ateom-otlp-relay) | none |
+
+**The default path.** Each component sends its metrics to `OTEL_EXPORTER_OTLP_ENDPOINT`. ateom has no endpoint, so the push is its only path. Thus a cluster needs a collector to get all the metrics. [Where Telemetry Goes](#4-where-telemetry-goes) gives the backend for each environment.
+
+**The optional path.** Each component except ateom always serves Prometheus `/metrics`. The manifests put no `prometheus.io/scrape` annotation on a pod, so nothing scrapes the endpoint unless the operator asks for it. To scrape a component, add the annotation or a `PodMonitor` to its pod, and set `OTEL_METRICS_EXPORTER=none` on it. Without `none`, a backend that receives the push and the scrape gets each series two times. If the scrape goes to a different backend, keep the push.
+
+**The setting.** `OTEL_METRICS_EXPORTER` controls only the push. It accepts `otlp` (the default) and `none`, the same values as `OTEL_LOGS_EXPORTER`. Any other value logs a warning and keeps the push. `none` does not turn off `/metrics`, and it does not change traces or logs. atecontroller does not copy the variable to the ateom worker pods, so ateom always pushes.
+
+**The health probes.** ateapi, atelet, atenet-router, and the credential provider serve `/readyz` and `/healthz` on the same `:9090` server as `/metrics`. That server runs for each value of `OTEL_METRICS_EXPORTER`, so the setting does not change the probes. atecontroller serves its probes on `:8081`.
+
+**The exceptions.**
+
+* ateom serves no endpoint. It runs in the worker pod next to the actor, and it has no HTTP server. It pushes through the atelet relay only.
+* atecontroller serves `ate.workerpool.*` on `:8080` only with `none`. `:8080` is the metrics server of controller-runtime. With `otlp`, atecontroller [bridges that registry onto the push](#bridged-controller-runtime-metrics-atecontroller), so its OTel instruments stay off the registry. Otherwise the bridge pushes them a second time. With `none`, the instruments register on the registry, and `:8080` serves them next to the controller-runtime families.
+
+**A new component** calls the setup function that matches it. [Getting a meter](dev/best-practices/metrics.md#getting-a-meter) gives the list.
 
 ### Local Metrics with Prometheus (Kind Cluster)
 
@@ -347,7 +368,7 @@ To explore metrics locally:
 2. **Open the Prometheus UI** in your web browser:
    [http://localhost:9090](http://localhost:9090)
 
-3. **Query metrics**: Run `up` to confirm each component is scraped (one series per target, value `1`), then explore the `rpc_*` series via the expression browser's autocomplete. **Status > Targets** lists the discovered pods.
+3. **Query metrics**: The components push to the in-cluster collector, and Prometheus reads them from the collector on `:8889`, as on a cluster with the default settings. Run `target_info` to confirm that each component pushes (one series for each process, with `job` set to the service name), then explore the `rpc_*` series via the expression browser's autocomplete. **Status > Targets** lists the collector ports, and no component pod.
 
 > **Note:** Storage is ephemeral (`emptyDir`), so metrics are lost when the Prometheus pod restarts.
 

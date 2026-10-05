@@ -65,6 +65,13 @@ data:
     # The kubernetes-pods scrape job below is adapted from the
     # prometheus-community Helm chart's job of the same name:
     # https://github.com/prometheus-community/helm-charts/blob/main/charts/prometheus/values.yaml
+    #
+    # No substrate pod carries the prometheus.io/scrape annotation, thus this
+    # job finds no target by default. The components push their metrics to
+    # the collector, and the otel-collector job below reads them there, as on
+    # a cluster with the default settings. To scrape a component directly,
+    # add the annotation to its pod and set OTEL_METRICS_EXPORTER=none on it,
+    # or each of its series arrives twice.
     global:
       scrape_interval: 15s
     scrape_configs:
@@ -108,21 +115,23 @@ data:
             action: drop
             regex: Pending|Succeeded|Failed
 
-      # The two read ports of the collector: 8889 carries the substrate_*
-      # counts of the count connector, and 8888 the otelcol_* counters of the
-      # collector itself. The two go together: when a service reports zero
-      # volume, otelcol_receiver_accepted_* shows the difference between a
-      # service that sent nothing and data that never arrived.
+      # The two read ports of the collector. 8889 re-exports each metric
+      # that the components push, and the substrate_* counts of the count
+      # connector. 8888 carries the otelcol_* counters of the collector
+      # itself. When a service reports zero volume,
+      # otelcol_receiver_accepted_* shows the difference between a service
+      # that sent nothing and data that never arrived.
       #
-      # This job, and not the annotation job above, reads the collector. The
-      # annotation can name one port only, thus the collector pod carries no
-      # prometheus.io/scrape annotation. Read the two ports here instead.
+      # The annotation can name one port only, thus the collector pod carries
+      # no prometheus.io/scrape annotation, and this job reads the two ports.
       #
-      # 8889 re-exports each metric that the pipelines push, and the pods of
-      # ate-api-server, atelet, and atenet-router already carry the annotation
-      # on 9090. Keep the substrate_* and otelcol_* names only, or every
-      # series of those services arrives twice and sum() gives double.
-      - job_name: otel-collector-self
+      # honor_labels keeps the job and instance labels that the exporter
+      # gives each pushed series (service.name and service.instance.id), so
+      # a series joins to its target_info, and job="ateapi" selects ateapi.
+      # The pod and namespace labels name the collector. target_info carries
+      # the k8s_* attributes of the component.
+      - job_name: otel-collector
+        honor_labels: true
         kubernetes_sd_configs:
           - role: pod
             namespaces:
@@ -140,10 +149,6 @@ data:
           - source_labels: [__meta_kubernetes_namespace]
             action: replace
             target_label: namespace
-        metric_relabel_configs:
-          - source_labels: [__name__]
-            action: keep
-            regex: (substrate|otelcol)_.*
 ---
 apiVersion: apps/v1
 kind: Deployment

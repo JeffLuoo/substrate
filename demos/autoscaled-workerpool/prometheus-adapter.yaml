@@ -19,8 +19,9 @@
 # trimmed to the external-metrics path and pointed at the in-cluster Prometheus.
 #Runs in ate-demo-autoscaled-workerpool.
 #
-# Flow: ate-api-server:9090/metrics --scrape--> Prometheus --query--> adapter
-#       --external.metrics.k8s.io--> HPA --/scale--> WorkerPool -> Deployment.
+# Flow: ate-api-server --OTLP--> collector:8889 --scrape--> Prometheus
+#       --query--> adapter --external.metrics.k8s.io--> HPA --/scale-->
+#       WorkerPool -> Deployment.
 
 apiVersion: v1
 kind: ServiceAccount

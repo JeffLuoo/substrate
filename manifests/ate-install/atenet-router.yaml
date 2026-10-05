@@ -128,9 +128,6 @@ spec:
     metadata:
       labels:
         app: atenet-router
-      annotations:
-        prometheus.io/scrape: "true"
-        prometheus.io/port: "9090"
     spec:
       serviceAccountName: atenet-router
       # Budget for the full shutdown sequence: --drain-delay (13s, readiness

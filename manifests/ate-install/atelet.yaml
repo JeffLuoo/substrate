@@ -120,9 +120,6 @@ spec:
       labels:
         app: atelet
         ate.dev/substrate-version: "${SUBSTRATE_VERSION}"
-      annotations:
-        prometheus.io/scrape: "true"
-        prometheus.io/port: "9090"
     spec:
       serviceAccountName: atelet
       priorityClassName: ate-node-critical

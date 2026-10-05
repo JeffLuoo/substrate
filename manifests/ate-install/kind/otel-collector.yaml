@@ -172,8 +172,9 @@ spec:
         app: opentelemetry-collector
       # There is no prometheus.io/scrape annotation here. The annotation can
       # name one port only, and the collector has two to read: 8889 for the
-      # substrate_* counts and 8888 for the otelcol_* counters. The
-      # otel-collector-self job in prometheus.yaml reads both.
+      # component metrics and the substrate_* counts, and 8888 for the
+      # otelcol_* counters. The otel-collector job in prometheus.yaml reads
+      # both.
     spec:
       containers:
       - name: otel-collector

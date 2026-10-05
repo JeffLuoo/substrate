@@ -73,9 +73,6 @@ spec:
     metadata:
       labels:
         app: ate-api-server
-      annotations:
-        prometheus.io/scrape: "true"
-        prometheus.io/port: "9090"
     spec:
       # TODO: Add topologySpreadConstraints to spread replicas across nodes and zones.
       serviceAccountName: ate-api-server
