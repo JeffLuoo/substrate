@@ -8,7 +8,7 @@ a different guide.
 | Guide | Start here when |
 |---|---|
 | [Requests are slow or return 503](requests-are-slow.md) | A client waited too long, or got a 503 |
-| [Substrate has no capacity for an actor](capacity-is-full.md) | A resume fails because no worker is free, or a constraint hides the free ones |
+| [Substrate has no capacity for an actor](capacity-is-full.md) | A resume fails because no worker has room for the actor, or a constraint hides the workers that have room |
 | [Resumes are slow](resumes-are-slow.md) | The activation of a suspended actor is slow |
 
 **Start with [Requests are slow](requests-are-slow.md)** when a user reports a

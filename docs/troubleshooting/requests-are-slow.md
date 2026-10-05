@@ -28,15 +28,17 @@ Four outcomes reach the client, and three of them are a 503 error:
 | What the client sees | Label | Cause |
 |---|---|---|
 | A slow but correct response | `ate.router.resume="triggered"` | The actor was not on a worker. The request paid for the resume. |
-| `503 no free workers available` | `ate.router.outcome="no_capacity"` | The park budget ended and the fleet stayed full. |
-| `503 router at capacity` | `ate.router.outcome="no_capacity"`, and `parking.rejected` increases | The parking area is full. The router sheds the request without a wait. |
+| `503 no free workers available` | `ate.router.outcome="no_capacity"` | The park budget ended and no worker had room. |
+| `503 router at capacity` | `ate.router.outcome="unavailable"`, and `parking.rejected` increases | The parking area is full. The router sheds the request without a wait. |
 | A 503 error with no capacity pressure | `ate.router.outcome="resume_error"` | A defect. Examine the router and ateapi. |
 
-**Two different faults share the `no_capacity` outcome.** The router maps each
-503 that it makes onto that one value, thus the label alone does not separate a
-full fleet from a full parking area. Only `parking.rejected` does, and step 3
-reads it. The two need opposite work: a full fleet needs more workers, a full
-parking area needs a larger lot or a shorter resume.
+**`no_capacity` means only that no worker had room.** The router reports it
+only when ateapi returns `ResourceExhausted`. A full parking area is
+`unavailable`, together with other causes, such as a denied egress request or
+a failed policy lookup. `parking.rejected` tells the full parking area apart
+from the other causes, and step 3 reads it. A full fleet and a full parking
+area need opposite work: a full fleet needs more workers, a full parking area
+needs a larger lot or a shorter resume.
 
 **Parking** is why a full fleet does not immediately give an error. The router
 holds the request and does the resume again with a backoff. Refer to
@@ -69,7 +71,8 @@ sum by("ate.router.outcome") (
 
 | Outcome | Go to |
 |---|---|
-| `no_capacity` | Step 3 first. It tells you whether the fleet or the parking area is full. Go to [capacity-is-full.md](capacity-is-full.md) only when the parking area is not the cause. |
+| `no_capacity` | [capacity-is-full.md](capacity-is-full.md). |
+| `unavailable` | Step 3. It tells you whether the parking area is full. If it is not, read the logs of the router. |
 | `resume_error` | Step 3, and then the logs of ateapi. |
 | `ok` but slow | Step 2. |
 | `ok`, but the client got an error | The fault is after the boundary of the router. The router found the endpoint and Envoy could not use it. Go to step 5. |
@@ -88,14 +91,11 @@ step 4.
 ## Step 2. Divide the warm route from the resume
 
 **Keep both `ate.router.outcome` and `ate.router.resume` in the `by()` clause.**
-The resume state alone does not tell you what it means, because the router also
-reports `none` for a request that stopped before it reached a resume state. The
-outcome is what separates the two readings, thus the query must group by both.
-
-Keep the resume key for a second reason: if you remove it, the aggregation adds
-the warm route to the activation. A warm route is milliseconds and an
-activation is hundreds of milliseconds or more, thus one distribution then
-holds both and the merged number describes neither.
+If you remove the resume key, the aggregation adds the warm route to the
+activation. A warm route is milliseconds and an activation is hundreds of
+milliseconds or more, thus one distribution then holds both and the merged
+number describes neither. The outcome tells you which failed requests are in
+the `unknown` series.
 
 **Prometheus**
 
@@ -111,15 +111,15 @@ histogram_quantile(0.95, sum by(le, "ate.router.outcome", "ate.router.resume") (
   rate({__name__="atenet.router.route.duration_bucket"}[5m])))
 ```
 
-**Read this key only together with the outcome.** `none` is also the value that
-the router uses when the request never got as far as a resume state. Thus a
-failed route reports `none` although it did try to resume.
+The router sets `none`, `triggered` and `joined` only for a resume that
+completed. Each request whose resume did not complete is `unknown`.
 
-| Series | With `outcome="ok"` | With a failed outcome |
+| Series | Meaning | Next |
 |---|---|---|
-| `none` | The warm route. The actor was already in operation. This must stay in milliseconds. Go to step 3. | No information. The request stopped before the router set the state. Use step 3 and step 4. |
-| `triggered` | This request did the resume. Go to [resumes-are-slow.md](resumes-are-slow.md). | The resume failed. Go to [resumes-are-slow.md](resumes-are-slow.md). |
-| `joined` | This request waited for the resume of a different request. Do not count these as separate activations. | The same, and the flight that it joined failed. |
+| `none` | The warm route. The actor was already in operation. This must stay in milliseconds. | If it is slow, go to step 3. |
+| `triggered` | This request did the resume. Its time is the activation time. | [resumes-are-slow.md](resumes-are-slow.md). |
+| `joined` | This request waited for the resume of a different request. Do not count these as separate activations. | [resumes-are-slow.md](resumes-are-slow.md), from the `triggered` series. |
+| `unknown` | The resume failed, the client stopped, the router shed the request, or the request was egress. Its time is not an activation time. | Read the outcome of the same series, then step 3 and step 4. |
 
 ## Step 3. Examine the queue in the router
 
@@ -145,11 +145,12 @@ histogram_quantile(0.95, sum by(le, outcome) (
   rate({__name__="atenet.router.parking.wait.duration_bucket"}[5m])))
 ```
 
-**This step splits the two faults that share the `no_capacity` outcome.**
+**This step tells a full parking area apart from the other `unavailable`
+causes.**
 
 | `parking.rejected` | Meaning | Next |
 |---|---|---|
-| Zero | The parking area had room. The requests waited and the fleet stayed full. | [capacity-is-full.md](capacity-is-full.md) |
+| Zero | The parking area had room. The `unavailable` requests have a different cause. | The logs of the router. |
 | Above zero | The parking area is full. The router shed the requests without a wait. | Make the lot larger with `--parked-request-max`, or make the resume faster with [resumes-are-slow.md](resumes-are-slow.md). Growing the pool does not help a shed request. |
 
 An absent `parking.rejected` series counts as zero: the counter appears only
