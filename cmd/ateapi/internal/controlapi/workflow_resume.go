@@ -270,8 +270,13 @@ func (w *ActorWorkflow) ensureWorkerAssigned(ctx context.Context, actorRef resou
 	}
 	var assignedActor *ateapipb.Actor
 	var assignedWorker *ateapipb.Worker
+	// ctxErr marks the loop ending between attempts, where no attempt ran and
+	// so none recorded.
+	var ctxErr error
+	start := time.Now()
 	err = wait.ExponentialBackoff(backoff, func() (bool, error) {
 		if err := ctx.Err(); err != nil {
+			ctxErr = err
 			return false, err
 		}
 		attemptActor, attemptWorker, attemptErr := w.assignWorkerAttempt(ctx, actorRef, actor, actorTemplate)
@@ -287,14 +292,44 @@ func (w *ActorWorkflow) ensureWorkerAssigned(ctx context.Context, actorRef resou
 		}
 		return false, attemptErr
 	})
-	if err != nil {
-		if wait.Interrupted(err) && !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
-			return nil, nil, store.ErrVersionConflict
-		}
+	// The retried attempts hid their own records, so the resume would leave no
+	// trace on the histogram without one here.
+	switch {
+	case err == nil:
+		return assignedActor, assignedWorker, nil
+	case ctxErr != nil:
+		w.recordExhaustedAssignment(ctx, start, actorTemplate, ctxErr)
+		return nil, nil, err
+	case wait.Interrupted(err):
+		w.recordExhaustedAssignment(ctx, start, actorTemplate, errAssignmentExhausted)
+		return nil, nil, store.ErrVersionConflict
+	default:
+		// assignWorkerAttempt recorded this one itself.
 		return nil, nil, err
 	}
-	return assignedActor, assignedWorker, nil
 }
+
+// recordExhaustedAssignment writes the one record of an assignment loop that
+// ended without assigning. No worker was assigned, so no pool is named.
+//
+// no_capacity would describe a loop that only found full workers better, but
+// that needs the returned status to change with it; see errAssignmentExhausted.
+func (w *ActorWorkflow) recordExhaustedAssignment(ctx context.Context, start time.Time, actorTemplate *ateapipb.ActorTemplate, err error) {
+	class := ""
+	if actorTemplate != nil {
+		class = sandboxClassString(actorTemplate.GetSandboxConfig().GetSandboxClass())
+	}
+	w.instruments.recordSchedulerAssignment(ctx, start, ateattr.SchedulerOutcomeError, "", "", class, err)
+}
+
+// errAssignmentExhausted gives the exhaustion record the code the RPC caller
+// gets: the loop returns store.ErrVersionConflict, which RPCService.ResumeActor
+// maps to Aborted. The sentinel itself would record Internal.
+//
+// ate.actor.lifecycle.operation.duration still reports Internal here, because
+// it is recorded in ActorWorkflow.ResumeActor, before that mapping. That is a
+// separate defect of the lifecycle record and is not fixed here.
+var errAssignmentExhausted = apierror.Aborted("concurrent update conflict, please retry")
 
 // validateAssignedWorker checks a RESUMING actor's persisted assignment
 // against the current worker record. Every invalid outcome crashes the actor:
@@ -403,12 +438,12 @@ func (w *ActorWorkflow) workerHoldingStaleClaim(ctx context.Context, actor *atea
 	return nil, nil
 }
 
-// schedulerRecordable excludes retried version conflicts: the assignment loop
-// re-runs attempts transparently on store.ErrVersionConflict, so counting
-// those attempts would inflate the error rate and double-count the eventual
-// success.
+// schedulerRecordable excludes the two errors the assignment loop retries
+// transparently. Counting a retried attempt would inflate the error rate and
+// double-count the eventual success; ensureWorkerAssigned records a loop that
+// never succeeds.
 func schedulerRecordable(err error) bool {
-	return !errors.Is(err, store.ErrVersionConflict)
+	return !errors.Is(err, store.ErrVersionConflict) && !errors.Is(err, errWorkerFilledUp)
 }
 
 // assignWorkerAttempt makes one attempt at claiming a worker for the actor
@@ -480,6 +515,9 @@ func (w *ActorWorkflow) assignWorkerAttempt(ctx context.Context, actorRef resour
 			w.workerCache.Forget(assignedWorker.GetMetadata().GetName())
 			return nil, nil, fmt.Errorf("selected worker disappeared before claim: %w", store.ErrVersionConflict)
 		}
+		// errWorkerFilledUp leaves the cache alone: it reports no room for
+		// this actor's size, so forgetting the worker would hide it from
+		// every smaller actor until the next watch event or relist.
 		return nil, nil, err
 	}
 
