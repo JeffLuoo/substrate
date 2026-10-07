@@ -24,6 +24,7 @@ import (
 	"google.golang.org/grpc/status"
 
 	"github.com/agent-substrate/substrate/cmd/atenet/internal/router/extproc"
+	"github.com/agent-substrate/substrate/internal/ateattr"
 	"github.com/agent-substrate/substrate/internal/resources"
 )
 
@@ -45,6 +46,17 @@ func statusDescription(err error) string {
 	return status.Convert(err).Message()
 }
 
+// shedOutcome returns the route outcome of a request that is shed while its
+// flight retries on retryErr: no_capacity for a ResourceExhausted retryErr,
+// unavailable otherwise. parkingFullErr and the parking.rejected label both
+// use it, so the two always agree.
+func shedOutcome(retryErr error) string {
+	if status.Code(retryErr) == codes.ResourceExhausted {
+		return ateattr.RouterOutcomeNoCapacity
+	}
+	return ateattr.RouterOutcomeUnavailable
+}
+
 // parkingFullErr returns a 503 denial signaling that the router's parking lot
 // is at capacity, so the request was shed without waiting. Clients should retry.
 //
@@ -53,7 +65,7 @@ func statusDescription(err error) string {
 // other retryErr is dropped: a shed request is not a lock conflict or a failed
 // precondition, so it reports unavailable.
 func parkingFullErr(actorID string, retryErr error) error {
-	if status.Code(retryErr) == codes.ResourceExhausted {
+	if shedOutcome(retryErr) == ateattr.RouterOutcomeNoCapacity {
 		return extproc.WrapReqError(envoy_type.StatusCode_ServiceUnavailable, retryErr,
 			"actor %q unavailable: router at capacity", actorID)
 	}

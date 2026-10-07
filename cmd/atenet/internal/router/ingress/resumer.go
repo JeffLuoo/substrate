@@ -233,11 +233,9 @@ func (r *ActorResumer) runFlight(f *resumeActorFlight, key string, actorRef reso
 		}
 
 		if r.retryable(err) {
-			// Store the error before the signal. A caller that is shed
-			// after it sees retrying reads the error in parkingFullErr.
+			// A caller that is shed reads err to pick its outcome.
 			// flightResult also reads it to report an elapsed budget as exhaustion.
-			f.setRetryErr(err)
-			f.signalRetrying()
+			f.signalRetrying(err)
 			return false, nil // park: retry until the budget elapses
 		}
 		// Keep the final error even if the retry budget has expired.
@@ -296,9 +294,10 @@ func (r *ActorResumer) awaitFlight(ctx context.Context, f *resumeActorFlight, ac
 	default:
 	}
 
-	release, ok := r.enterLot(ctx)
+	retryErr := f.retryErr()
+	release, ok := r.enterLot(ctx, shedOutcome(retryErr))
 	if !ok {
-		return nil, ResumeOutcomeUnknown, parkingFullErr(actorRef.String(), f.retryErr())
+		return nil, ResumeOutcomeUnknown, parkingFullErr(actorRef.String(), retryErr)
 	}
 	var finalErr error
 	defer func() { release(parkOutcomeFor(finalErr)) }()
@@ -315,10 +314,11 @@ func (r *ActorResumer) awaitFlight(ctx context.Context, f *resumeActorFlight, ac
 }
 
 // enterLot admits the caller to the parking lot, treating a nil lot as
-// unbounded (no admission control).
-func (r *ActorResumer) enterLot(ctx context.Context) (func(parkOutcome), bool) {
+// unbounded (no admission control). shedOutcome labels the rejection if the
+// lot is full.
+func (r *ActorResumer) enterLot(ctx context.Context, shedOutcome string) (func(parkOutcome), bool) {
 	if r.lot == nil {
 		return func(parkOutcome) {}, true
 	}
-	return r.lot.enter(ctx)
+	return r.lot.enter(ctx, shedOutcome)
 }

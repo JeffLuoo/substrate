@@ -34,6 +34,7 @@ import (
 	"google.golang.org/protobuf/types/known/structpb"
 
 	"github.com/agent-substrate/substrate/cmd/atenet/internal/router/extproc"
+	"github.com/agent-substrate/substrate/internal/ateattr"
 	"github.com/agent-substrate/substrate/internal/atenet"
 	"github.com/agent-substrate/substrate/internal/atunnel"
 	"github.com/agent-substrate/substrate/pkg/proto/ateapipb"
@@ -443,7 +444,7 @@ func TestHandleRequestHeaders_FullLotServesRunningActor(t *testing.T) {
 	// A 1-slot lot with the slot already occupied deterministically simulates a
 	// full lot without needing a concurrent in-flight request.
 	h := New(clientMock, ParkedRequestConfig{Budget: time.Second, Max: 1}, nil)
-	release, ok := h.parking.enter(context.Background())
+	release, ok := h.parking.enter(context.Background(), ateattr.RouterOutcomeUnavailable)
 	if !ok {
 		t.Fatal("priming enter should be admitted")
 	}
@@ -476,32 +477,37 @@ func TestHandleRequestHeaders_FullLotServesRunningActor(t *testing.T) {
 //
 // The shed keeps a ResourceExhausted retry failure as its cause, so the route
 // metric reports no_capacity. It drops any other retry failure, so the route
-// metric reports unavailable.
+// metric reports unavailable. parking.rejected carries the same outcome.
 func TestHandleRequestHeaders_FullLotShedsParkedRequest(t *testing.T) {
 	tests := []struct {
-		name      string
-		resumeErr error
-		wantCode  codes.Code
+		name        string
+		resumeErr   error
+		wantCode    codes.Code
+		wantOutcome string
 	}{
 		{
-			name:      "ResourceExhausted is kept as the cause",
-			resumeErr: status.Error(codes.ResourceExhausted, "no worker has room for the actor"),
-			wantCode:  codes.ResourceExhausted,
+			name:        "ResourceExhausted is kept as the cause",
+			resumeErr:   status.Error(codes.ResourceExhausted, "no worker has room for the actor"),
+			wantCode:    codes.ResourceExhausted,
+			wantOutcome: ateattr.RouterOutcomeNoCapacity,
 		},
 		{
-			name:      "Aborted is dropped",
-			resumeErr: status.Error(codes.Aborted, "another operation is in progress"),
-			wantCode:  codes.Unknown,
+			name:        "Aborted is dropped",
+			resumeErr:   status.Error(codes.Aborted, "another operation is in progress"),
+			wantCode:    codes.Unknown,
+			wantOutcome: ateattr.RouterOutcomeUnavailable,
 		},
 		{
-			name:      "FailedPrecondition is dropped",
-			resumeErr: status.Error(codes.FailedPrecondition, "actor is suspending"),
-			wantCode:  codes.Unknown,
+			name:        "FailedPrecondition is dropped",
+			resumeErr:   status.Error(codes.FailedPrecondition, "actor is suspending"),
+			wantCode:    codes.Unknown,
+			wantOutcome: ateattr.RouterOutcomeUnavailable,
 		},
 		{
-			name:      "Unavailable is dropped",
-			resumeErr: status.Error(codes.Unavailable, "ateapi restarting"),
-			wantCode:  codes.Unknown,
+			name:        "Unavailable is dropped",
+			resumeErr:   status.Error(codes.Unavailable, "ateapi restarting"),
+			wantCode:    codes.Unknown,
+			wantOutcome: ateattr.RouterOutcomeUnavailable,
 		},
 	}
 	for _, tc := range tests {
@@ -522,8 +528,9 @@ func TestHandleRequestHeaders_FullLotShedsParkedRequest(t *testing.T) {
 					},
 				}
 
-				h := New(clientMock, ParkedRequestConfig{Budget: 500 * time.Millisecond, Max: 1}, nil)
-				release, ok := h.parking.enter(context.Background())
+				parkMetrics, reader := newTestParkingMetrics(t)
+				h := New(clientMock, ParkedRequestConfig{Budget: 500 * time.Millisecond, Max: 1}, parkMetrics)
+				release, ok := h.parking.enter(context.Background(), ateattr.RouterOutcomeUnavailable)
 				if !ok {
 					t.Fatal("priming enter should be admitted")
 				}
@@ -549,6 +556,9 @@ func TestHandleRequestHeaders_FullLotShedsParkedRequest(t *testing.T) {
 				}
 				if got := status.Code(err); got != tc.wantCode {
 					t.Errorf("status.Code(err) = %v, want %v", got, tc.wantCode)
+				}
+				if got := rejectedByOutcome(t, reader); len(got) != 1 || got[tc.wantOutcome] != 1 {
+					t.Errorf("parking.rejected by outcome = %v, want {%s: 1}", got, tc.wantOutcome)
 				}
 				// Shedding happens at the park transition: exactly one attempt has run
 				// when the caller is turned away.

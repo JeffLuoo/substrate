@@ -47,19 +47,16 @@ func newResumeActorFlight() *resumeActorFlight {
 	return &resumeActorFlight{retrying: make(chan struct{}), done: make(chan struct{})}
 }
 
-// signalRetrying is idempotent; only the flight goroutine calls it.
-func (f *resumeActorFlight) signalRetrying() {
+// signalRetrying records err as the latest retryable failure, then closes
+// retrying. The store comes first, so a caller that sees retrying closed also
+// sees err. It is idempotent; only the flight goroutine calls it.
+func (f *resumeActorFlight) signalRetrying(err error) {
+	f.lastRetryErr.Store(&err)
 	if f.retryingSignaled {
 		return
 	}
 	f.retryingSignaled = true
 	close(f.retrying)
-}
-
-// setRetryErr records err as the latest retryable failure. Only the flight
-// goroutine calls it.
-func (f *resumeActorFlight) setRetryErr(err error) {
-	f.lastRetryErr.Store(&err)
 }
 
 // retryErr returns the latest retryable failure, or nil if there is none.
