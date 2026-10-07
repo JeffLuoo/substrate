@@ -294,6 +294,16 @@ func (w *ActorWorkflow) ensureWorkerAssigned(ctx context.Context, actorRef resou
 	})
 	// The retried attempts hid their own records, so the resume would leave no
 	// trace on the histogram without one here.
+	//
+	// wait.Interrupted also matches a context error, which an attempt returns
+	// when the context ends inside it; that attempt recorded itself. Only the
+	// timeout of the backoff means that the retries ran out.
+	exhausted := wait.Interrupted(err) && !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded)
+	if exhausted && ctx.Err() != nil {
+		// The context ended in the sleep after the last attempt.
+		ctxErr = ctx.Err()
+		err = ctxErr
+	}
 	switch {
 	case err == nil:
 		return assignedActor, assignedWorker, nil
@@ -302,7 +312,7 @@ func (w *ActorWorkflow) ensureWorkerAssigned(ctx context.Context, actorRef resou
 			w.recordExhaustedAssignment(ctx, lastAttempt, actorTemplate, ctxErr)
 		}
 		return nil, nil, err
-	case wait.Interrupted(err):
+	case exhausted:
 		err = apierror.Aborted("concurrent update conflict, please retry: %w", store.ErrVersionConflict)
 		w.recordExhaustedAssignment(ctx, lastAttempt, actorTemplate, err)
 		return nil, nil, err

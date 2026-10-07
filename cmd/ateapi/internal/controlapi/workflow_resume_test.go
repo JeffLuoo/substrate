@@ -1644,6 +1644,8 @@ type filledUpScheduler struct {
 	// onSchedule runs after each Schedule call, with the number of calls made
 	// so far, so a test can act between attempts.
 	onSchedule func(calls int)
+	// err, if set, is what every Schedule call returns.
+	err error
 }
 
 // Schedule repeats the last worker, so a test that offers no free one keeps
@@ -1653,6 +1655,9 @@ func (s *filledUpScheduler) Schedule(context.Context, scheduling.Constraints) (*
 	s.calls++
 	if s.onSchedule != nil {
 		s.onSchedule(s.calls)
+	}
+	if s.err != nil {
+		return nil, s.err
 	}
 	return s.workers[i], nil
 }
@@ -1891,26 +1896,26 @@ func TestEnsureWorkerAssigned_ExhaustedBackoffRecordsOneError(t *testing.T) {
 
 	// One attempt against the stubs takes microseconds, so a record that
 	// includes the sleep after the last attempt goes above half of it.
-	sleep := minSleepAfterLastAttempt(t, assignmentBackoff)
+	_, sleep := replayBackoff(t, assignmentBackoff)
 	if recorded := assignmentSum(t, reader); recorded >= sleep.Seconds()/2 {
 		t.Errorf("recorded duration = %.3fs, want less than %.3fs: the record must time the last attempt, not the backoff", recorded, sleep.Seconds()/2)
 	}
 }
 
-// minSleepAfterLastAttempt returns the shortest sleep that
-// wait.ExponentialBackoff makes with b after its last attempt and before it
-// gives up. It replays the steps of ExponentialBackoff without jitter.
-func minSleepAfterLastAttempt(t *testing.T, b wait.Backoff) time.Duration {
+// replayBackoff returns how many attempts wait.ExponentialBackoff makes with
+// b, and the shortest sleep it makes after the last attempt before it gives
+// up. It replays the steps of ExponentialBackoff without jitter.
+func replayBackoff(t *testing.T, b wait.Backoff) (attempts int, lastSleep time.Duration) {
 	t.Helper()
 	b.Jitter = 0
-	var last time.Duration
 	for b.Steps > 0 {
+		attempts++
 		if b.Steps == 1 {
-			t.Fatal("the backoff ends on Steps, with no sleep after the last attempt; the duration check needs a backoff that ends on Cap")
+			t.Fatal("the backoff ends on Steps, with no sleep after the last attempt; these tests need a backoff that ends on Cap")
 		}
-		last = b.Step()
+		lastSleep = b.Step()
 	}
-	return last
+	return attempts, lastSleep
 }
 
 // TestEnsureWorkerAssigned_CancelledDuringBackoffRecordsOne covers the loop
@@ -1977,5 +1982,72 @@ func TestEnsureWorkerAssigned_CancelledBeforeFirstAttemptRecordsNothing(t *testi
 	}
 	if got, outcomes := assignmentObservations(t, reader); got != 0 {
 		t.Errorf("observations on ate.scheduler.assignment.duration = %d %v, want 0", got, outcomes)
+	}
+}
+
+// TestEnsureWorkerAssigned_CancelledInLastSleepRecordsOne covers the context
+// ending in the sleep after the last attempt. The backoff then gives up with
+// its own timeout, but the caller went away, so the resume reports the
+// context error and not that the retries ran out.
+func TestEnsureWorkerAssigned_CancelledInLastSleepRecordsOne(t *testing.T) {
+	sched := &filledUpScheduler{
+		workers: []*ateapipb.Worker{contendedWorker("full-pod")},
+		full:    map[string]bool{"full-pod": true},
+	}
+	w, actor, reader := newContendedWorkflow(t, sched)
+
+	attempts, _ := replayBackoff(t, assignmentBackoff)
+	ctx, cancel := context.WithCancel(context.Background())
+	sched.onSchedule = func(calls int) {
+		if calls == attempts {
+			cancel()
+		}
+	}
+	defer cancel()
+
+	_, _, err := w.ensureWorkerAssigned(ctx, resources.ActorRef{Atespace: "team-a", Name: "id1"}, actor, gvisorTemplate())
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("ensureWorkerAssigned error = %v, want context.Canceled", err)
+	}
+	if sched.calls != attempts {
+		t.Fatalf("Schedule calls = %d, want %d: the context must end after the last attempt", sched.calls, attempts)
+	}
+
+	got, outcomes := assignmentObservations(t, reader)
+	if got != 1 {
+		t.Fatalf("observations on ate.scheduler.assignment.duration = %d %v, want 1 for the whole resume", got, outcomes)
+	}
+	want := ateattr.SchedulerOutcomeError + "/" + codes.Canceled.String()
+	if outcomes[0] != want {
+		t.Errorf("recorded outcome %q, want %q", outcomes[0], want)
+	}
+}
+
+// TestEnsureWorkerAssigned_ContextEndsInsideAttemptRecordsOne covers an
+// attempt that fails because the context ended inside it. The attempt records
+// itself, so the loop must not add a second record, and the caller gets the
+// context error and not Aborted.
+func TestEnsureWorkerAssigned_ContextEndsInsideAttemptRecordsOne(t *testing.T) {
+	sched := &filledUpScheduler{
+		workers: []*ateapipb.Worker{contendedWorker("free-pod")},
+		err:     fmt.Errorf("list workers: %w", context.DeadlineExceeded),
+	}
+	w, actor, reader := newContendedWorkflow(t, sched)
+
+	_, _, err := w.ensureWorkerAssigned(context.Background(), resources.ActorRef{Atespace: "team-a", Name: "id1"}, actor, gvisorTemplate())
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("ensureWorkerAssigned error = %v, want context.DeadlineExceeded", err)
+	}
+	if got := apierror.Code(err); got != codes.DeadlineExceeded {
+		t.Errorf("apierror.Code(err) = %v, want %v (err: %v)", got, codes.DeadlineExceeded, err)
+	}
+
+	got, outcomes := assignmentObservations(t, reader)
+	if got != 1 {
+		t.Fatalf("observations on ate.scheduler.assignment.duration = %d %v, want 1 for the whole resume", got, outcomes)
+	}
+	want := ateattr.SchedulerOutcomeError + "/" + codes.DeadlineExceeded.String()
+	if outcomes[0] != want {
+		t.Errorf("recorded outcome %q, want %q", outcomes[0], want)
 	}
 }
