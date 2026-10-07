@@ -273,13 +273,19 @@ func (w *ActorWorkflow) ensureWorkerAssigned(ctx context.Context, actorRef resou
 	// ctxErr marks the loop ending between attempts, where no attempt ran and
 	// so none recorded.
 	var ctxErr error
-	start := time.Now()
+	// lastAttempt times only the last attempt, as every other record on the
+	// histogram does. The backoff can sleep once more after the last attempt
+	// before it gives up, so the time since that attempt began is too long.
+	var lastAttempt time.Duration
 	err = wait.ExponentialBackoff(backoff, func() (bool, error) {
+		attemptStart := time.Now()
 		if err := ctx.Err(); err != nil {
 			ctxErr = err
+			lastAttempt = time.Since(attemptStart)
 			return false, err
 		}
 		attemptActor, attemptWorker, attemptErr := w.assignWorkerAttempt(ctx, actorRef, actor, actorTemplate)
+		lastAttempt = time.Since(attemptStart)
 		if attemptErr == nil {
 			assignedActor, assignedWorker = attemptActor, attemptWorker
 			return true, nil
@@ -298,11 +304,12 @@ func (w *ActorWorkflow) ensureWorkerAssigned(ctx context.Context, actorRef resou
 	case err == nil:
 		return assignedActor, assignedWorker, nil
 	case ctxErr != nil:
-		w.recordExhaustedAssignment(ctx, start, actorTemplate, ctxErr)
+		w.recordExhaustedAssignment(ctx, lastAttempt, actorTemplate, ctxErr)
 		return nil, nil, err
 	case wait.Interrupted(err):
-		w.recordExhaustedAssignment(ctx, start, actorTemplate, errAssignmentExhausted)
-		return nil, nil, store.ErrVersionConflict
+		err = apierror.Aborted("concurrent update conflict, please retry: %w", store.ErrVersionConflict)
+		w.recordExhaustedAssignment(ctx, lastAttempt, actorTemplate, err)
+		return nil, nil, err
 	default:
 		// assignWorkerAttempt recorded this one itself.
 		return nil, nil, err
@@ -311,25 +318,13 @@ func (w *ActorWorkflow) ensureWorkerAssigned(ctx context.Context, actorRef resou
 
 // recordExhaustedAssignment writes the one record of an assignment loop that
 // ended without assigning. No worker was assigned, so no pool is named.
-//
-// no_capacity would describe a loop that only found full workers better, but
-// that needs the returned status to change with it; see errAssignmentExhausted.
-func (w *ActorWorkflow) recordExhaustedAssignment(ctx context.Context, start time.Time, actorTemplate *ateapipb.ActorTemplate, err error) {
+func (w *ActorWorkflow) recordExhaustedAssignment(ctx context.Context, elapsed time.Duration, actorTemplate *ateapipb.ActorTemplate, err error) {
 	class := ""
 	if actorTemplate != nil {
 		class = sandboxClassString(actorTemplate.GetSandboxConfig().GetSandboxClass())
 	}
-	w.instruments.recordSchedulerAssignment(ctx, start, ateattr.SchedulerOutcomeError, "", "", class, err)
+	w.instruments.recordSchedulerAssignment(ctx, elapsed, ateattr.SchedulerOutcomeError, "", "", class, err)
 }
-
-// errAssignmentExhausted gives the exhaustion record the code the RPC caller
-// gets: the loop returns store.ErrVersionConflict, which RPCService.ResumeActor
-// maps to Aborted. The sentinel itself would record Internal.
-//
-// ate.actor.lifecycle.operation.duration still reports Internal here, because
-// it is recorded in ActorWorkflow.ResumeActor, before that mapping. That is a
-// separate defect of the lifecycle record and is not fixed here.
-var errAssignmentExhausted = apierror.Aborted("concurrent update conflict, please retry")
 
 // validateAssignedWorker checks a RESUMING actor's persisted assignment
 // against the current worker record. Every invalid outcome crashes the actor:
@@ -462,7 +457,7 @@ func (w *ActorWorkflow) assignWorkerAttempt(ctx context.Context, actorRef resour
 	}
 	defer func() {
 		if schedulerRecordable(err) {
-			w.instruments.recordSchedulerAssignment(ctx, start, outcome, poolNamespace, pool, class, err)
+			w.instruments.recordSchedulerAssignment(ctx, time.Since(start), outcome, poolNamespace, pool, class, err)
 		}
 	}()
 

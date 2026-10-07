@@ -806,18 +806,12 @@ groups:
     brief: The time of one attempt of the scheduler to assign a worker during a resume.
     note: >
       One resume gives one record. ateapi retries an attempt that loses a race
-      for a worker, either on a version conflict or on a worker that filled up
-      between the read of the cache and the lock of the row, and it records
-      only the attempt that ends the loop. A loop that ends without assigning,
-      because the attempts ran out or because the caller went away, gives one
-      record with the outcome error, and its error.type is the code the caller
-      gets. A loop that only ever found full workers ends on a lack of room,
-      which no_capacity describes better; reporting it that way needs the
-      status the caller gets to change with it.
-      The buckets are smaller than the buckets of the lifecycle
-      histogram. This step is a read of the cache and some writes to the store.
-      It is not a restore of some seconds. But the buckets go to 5 s. Thus you
-      can see a large delay in the store.
+      for a worker, and records only the last attempt. If the retries run out,
+      the outcome is error, and error.type is the code that the caller gets.
+      The buckets are smaller than the buckets of the lifecycle histogram.
+      This step is a read of the cache and some writes to the store. It is not
+      a restore of some seconds. But the buckets go to 5 s. Thus you can see a
+      large delay in the store.
     annotations:
       substrate:
         emitted_by: [ateapi]

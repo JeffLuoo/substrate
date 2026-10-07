@@ -1739,6 +1739,25 @@ func assignmentObservations(t *testing.T, reader *sdkmetric.ManualReader) (int, 
 	return total, outcomes
 }
 
+// assignmentSum returns the total of every observation on
+// ate.scheduler.assignment.duration, in seconds.
+func assignmentSum(t *testing.T, reader *sdkmetric.ManualReader) float64 {
+	t.Helper()
+	m, ok := collectMetric(t, reader, "ate.scheduler.assignment.duration")
+	if !ok {
+		return 0
+	}
+	hist, ok := m.Data.(metricdata.Histogram[float64])
+	if !ok {
+		t.Fatalf("ate.scheduler.assignment.duration data = %T, want Histogram[float64]", m.Data)
+	}
+	var sum float64
+	for _, dp := range hist.DataPoints {
+		sum += dp.Sum
+	}
+	return sum
+}
+
 func contendedWorker(podName string) *ateapipb.Worker {
 	return &ateapipb.Worker{
 		Metadata:        &ateapipb.ResourceMetadata{Name: testWorkerUID(podName)},
@@ -1838,7 +1857,10 @@ func TestEnsureWorkerAssigned_ContentionRecordsOneObservation(t *testing.T) {
 // end: every attempt loses the race, the retries run out, and the resume
 // fails. The histogram carries one observation for the resume, and not one
 // for each attempt. error.type is the code RPCService.ResumeActor returns, so
-// the scheduler histogram agrees with the router.
+// the scheduler histogram agrees with the router. The returned error carries
+// that code too, so ate.actor.lifecycle.operation.duration, which classifies
+// the same error, also records Aborted. The record times the last attempt and
+// not the backoff, as every other record on the histogram does.
 func TestEnsureWorkerAssigned_ExhaustedBackoffRecordsOneError(t *testing.T) {
 	sched := &filledUpScheduler{
 		workers: []*ateapipb.Worker{contendedWorker("full-pod")},
@@ -1846,8 +1868,15 @@ func TestEnsureWorkerAssigned_ExhaustedBackoffRecordsOneError(t *testing.T) {
 	}
 	w, actor, reader := newContendedWorkflow(t, sched)
 
-	if _, _, err := w.ensureWorkerAssigned(context.Background(), resources.ActorRef{Atespace: "team-a", Name: "id1"}, actor, gvisorTemplate()); err == nil {
+	_, _, err := w.ensureWorkerAssigned(context.Background(), resources.ActorRef{Atespace: "team-a", Name: "id1"}, actor, gvisorTemplate())
+	if err == nil {
 		t.Fatal("ensureWorkerAssigned succeeded, want a failure after the backoff ended")
+	}
+	if got := apierror.Code(err); got != codes.Aborted {
+		t.Errorf("apierror.Code(err) = %v, want %v (err: %v)", got, codes.Aborted, err)
+	}
+	if !errors.Is(err, store.ErrVersionConflict) {
+		t.Errorf("ensureWorkerAssigned error = %v, want one that wraps store.ErrVersionConflict for RPCService.ResumeActor", err)
 	}
 
 	got, outcomes := assignmentObservations(t, reader)
@@ -1857,6 +1886,12 @@ func TestEnsureWorkerAssigned_ExhaustedBackoffRecordsOneError(t *testing.T) {
 	want := ateattr.SchedulerOutcomeError + "/" + codes.Aborted.String()
 	if outcomes[0] != want {
 		t.Errorf("recorded outcome %q, want %q: error.type must be the code ResumeActor returns", outcomes[0], want)
+	}
+
+	// The backoff sleeps at least 240 ms after the last attempt before it
+	// gives up, and one attempt against the stubs takes microseconds.
+	if recorded := assignmentSum(t, reader); recorded >= 0.2 {
+		t.Errorf("recorded duration = %.3fs, want less than 0.2s: the record must time the last attempt, not the backoff", recorded)
 	}
 }
 
