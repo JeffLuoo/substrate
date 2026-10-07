@@ -260,32 +260,26 @@ func (w *ActorWorkflow) ensureWorkerAssigned(ctx context.Context, actorRef resou
 		return nil, nil, apierror.FailedPrecondition("AssignWorker prerequisite not met for Actor: %s (got: %v, want %s or %s)", actorRef, actor.GetStatus().GetState(), ateapipb.ActorState_ACTOR_STATE_SUSPENDED, ateapipb.ActorState_ACTOR_STATE_PAUSED)
 	}
 
-	// Bound contention retries to about three seconds.
-	backoff := wait.Backoff{
-		Steps:    12,
-		Duration: 15 * time.Millisecond,
-		Factor:   2.0,
-		Jitter:   1.0,
-		Cap:      250 * time.Millisecond,
-	}
 	var assignedActor *ateapipb.Actor
 	var assignedWorker *ateapipb.Worker
 	// ctxErr marks the loop ending between attempts, where no attempt ran and
 	// so none recorded.
 	var ctxErr error
-	// lastAttempt times only the last attempt, as every other record on the
-	// histogram does. The backoff can sleep once more after the last attempt
-	// before it gives up, so the time since that attempt began is too long.
+	// lastAttempt times only the last attempt that ran, as every other record
+	// on the histogram does. The backoff can sleep once more after the last
+	// attempt before it gives up, so the time since that attempt began is too
+	// long. attempted is false if the context ended before the first attempt.
 	var lastAttempt time.Duration
-	err = wait.ExponentialBackoff(backoff, func() (bool, error) {
-		attemptStart := time.Now()
+	attempted := false
+	err = wait.ExponentialBackoff(assignmentBackoff, func() (bool, error) {
 		if err := ctx.Err(); err != nil {
 			ctxErr = err
-			lastAttempt = time.Since(attemptStart)
 			return false, err
 		}
+		attemptStart := time.Now()
 		attemptActor, attemptWorker, attemptErr := w.assignWorkerAttempt(ctx, actorRef, actor, actorTemplate)
 		lastAttempt = time.Since(attemptStart)
+		attempted = true
 		if attemptErr == nil {
 			assignedActor, assignedWorker = attemptActor, attemptWorker
 			return true, nil
@@ -304,7 +298,9 @@ func (w *ActorWorkflow) ensureWorkerAssigned(ctx context.Context, actorRef resou
 	case err == nil:
 		return assignedActor, assignedWorker, nil
 	case ctxErr != nil:
-		w.recordExhaustedAssignment(ctx, lastAttempt, actorTemplate, ctxErr)
+		if attempted {
+			w.recordExhaustedAssignment(ctx, lastAttempt, actorTemplate, ctxErr)
+		}
 		return nil, nil, err
 	case wait.Interrupted(err):
 		err = apierror.Aborted("concurrent update conflict, please retry: %w", store.ErrVersionConflict)
@@ -314,6 +310,17 @@ func (w *ActorWorkflow) ensureWorkerAssigned(ctx context.Context, actorRef resou
 		// assignWorkerAttempt recorded this one itself.
 		return nil, nil, err
 	}
+}
+
+// assignmentBackoff bounds the retries of an assignment attempt that loses a
+// race for a worker. The delay reaches Cap after 5 attempts, which ends the
+// retries before Steps runs out, so the loop takes about 0.5 to 1 s.
+var assignmentBackoff = wait.Backoff{
+	Steps:    12,
+	Duration: 15 * time.Millisecond,
+	Factor:   2.0,
+	Jitter:   1.0,
+	Cap:      250 * time.Millisecond,
 }
 
 // recordExhaustedAssignment writes the one record of an assignment loop that

@@ -47,6 +47,7 @@ import (
 	"google.golang.org/protobuf/testing/protocmp"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/wait"
 )
 
 // TestSchedulerRecordable guards the retry-dedup rule: the assignment loop
@@ -1888,17 +1889,35 @@ func TestEnsureWorkerAssigned_ExhaustedBackoffRecordsOneError(t *testing.T) {
 		t.Errorf("recorded outcome %q, want %q: error.type must be the code ResumeActor returns", outcomes[0], want)
 	}
 
-	// The backoff sleeps at least 240 ms after the last attempt before it
-	// gives up, and one attempt against the stubs takes microseconds.
-	if recorded := assignmentSum(t, reader); recorded >= 0.2 {
-		t.Errorf("recorded duration = %.3fs, want less than 0.2s: the record must time the last attempt, not the backoff", recorded)
+	// One attempt against the stubs takes microseconds, so a record that
+	// includes the sleep after the last attempt goes above half of it.
+	sleep := minSleepAfterLastAttempt(t, assignmentBackoff)
+	if recorded := assignmentSum(t, reader); recorded >= sleep.Seconds()/2 {
+		t.Errorf("recorded duration = %.3fs, want less than %.3fs: the record must time the last attempt, not the backoff", recorded, sleep.Seconds()/2)
 	}
+}
+
+// minSleepAfterLastAttempt returns the shortest sleep that
+// wait.ExponentialBackoff makes with b after its last attempt and before it
+// gives up. It replays the steps of ExponentialBackoff without jitter.
+func minSleepAfterLastAttempt(t *testing.T, b wait.Backoff) time.Duration {
+	t.Helper()
+	b.Jitter = 0
+	var last time.Duration
+	for b.Steps > 0 {
+		if b.Steps == 1 {
+			t.Fatal("the backoff ends on Steps, with no sleep after the last attempt; the duration check needs a backoff that ends on Cap")
+		}
+		last = b.Step()
+	}
+	return last
 }
 
 // TestEnsureWorkerAssigned_CancelledDuringBackoffRecordsOne covers the loop
 // ending between attempts. The caller goes away while an attempt that lost a
 // race is waiting to retry, so no attempt records, and the resume would leave
-// no trace on the histogram without the one record the loop writes.
+// no trace on the histogram without the one record the loop writes. That
+// record times the attempt that lost the race, not the context check after it.
 func TestEnsureWorkerAssigned_CancelledDuringBackoffRecordsOne(t *testing.T) {
 	sched := &filledUpScheduler{
 		workers: []*ateapipb.Worker{contendedWorker("full-pod")},
@@ -1907,10 +1926,13 @@ func TestEnsureWorkerAssigned_CancelledDuringBackoffRecordsOne(t *testing.T) {
 	w, actor, reader := newContendedWorkflow(t, sched)
 
 	// Cancel once the first attempt has lost its race, so the loop ends in the
-	// pre-check of the second attempt and not before the first.
+	// pre-check of the second attempt and not before the first. The sleep
+	// makes that attempt long enough to tell apart from the context check.
+	const attemptTime = 50 * time.Millisecond
 	ctx, cancel := context.WithCancel(context.Background())
 	sched.onSchedule = func(calls int) {
 		if calls == 1 {
+			time.Sleep(attemptTime)
 			cancel()
 		}
 	}
@@ -1928,5 +1950,32 @@ func TestEnsureWorkerAssigned_CancelledDuringBackoffRecordsOne(t *testing.T) {
 	want := ateattr.SchedulerOutcomeError + "/" + codes.Canceled.String()
 	if outcomes[0] != want {
 		t.Errorf("recorded outcome %q, want %q", outcomes[0], want)
+	}
+	if recorded := assignmentSum(t, reader); recorded < attemptTime.Seconds() {
+		t.Errorf("recorded duration = %.3fs, want at least %.3fs: the record must time the attempt that lost the race", recorded, attemptTime.Seconds())
+	}
+}
+
+// TestEnsureWorkerAssigned_CancelledBeforeFirstAttemptRecordsNothing covers a
+// context that ended before the loop began. No attempt ran, so there is no
+// attempt to time and the histogram gets no record.
+func TestEnsureWorkerAssigned_CancelledBeforeFirstAttemptRecordsNothing(t *testing.T) {
+	sched := &filledUpScheduler{
+		workers: []*ateapipb.Worker{contendedWorker("free-pod")},
+	}
+	w, actor, reader := newContendedWorkflow(t, sched)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	_, _, err := w.ensureWorkerAssigned(ctx, resources.ActorRef{Atespace: "team-a", Name: "id1"}, actor, gvisorTemplate())
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("ensureWorkerAssigned error = %v, want context.Canceled", err)
+	}
+	if sched.calls != 0 {
+		t.Fatalf("Schedule calls = %d, want 0: no attempt may run after the context ended", sched.calls)
+	}
+	if got, outcomes := assignmentObservations(t, reader); got != 0 {
+		t.Errorf("observations on ate.scheduler.assignment.duration = %d %v, want 0", got, outcomes)
 	}
 }
