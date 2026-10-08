@@ -127,7 +127,7 @@ groups:
             - id: reverting
               stability: development
               value: reverting
-              brief: ateapi is discarding the actor's execution and returning it to its existing snapshot.
+              brief: ateapi is discarding the execution of the actor and returning it to the suspended state.
             - id: deleted
               stability: development
               value: deleted
@@ -166,7 +166,7 @@ groups:
             - id: revert
               stability: development
               value: revert
-              brief: ateapi discarded the actor's execution and returned it to its existing snapshot.
+              brief: ateapi discarded the execution of the actor and returned it to the suspended state.
             - id: unknown
               stability: development
               value: unknown
@@ -596,7 +596,13 @@ groups:
             - id: final
               stability: development
               value: final
-              brief: The last sample of an activation, written when a checkpoint, a terminate or graceful shutdown tears it down. It is read just before the teardown; when that read fails or times out, it repeats the newest measured sample, or writes a pending record when there is none.
+              brief: >
+                The last sample of an activation, written when a checkpoint, a
+                terminate, a graceful shutdown, or a re-host on ateom-microvm
+                ends it. When the sandbox is still running, ateom reads the
+                stats just before the teardown; when no read runs, or the read
+                fails or times out, it repeats the newest measured sample, or
+                writes a pending record when there is none.
       - id: ate.stats.memory.usage
         stability: development
         type: int
@@ -789,8 +795,11 @@ groups:
       ateapi does not record a resume of an actor that is already in operation.
       Thus this histogram counts the true activations and not the traffic of the
       router. The set of labels changes with the operation. A resume has the
-      most labels. A create and a delete have only the operation, the template
-      and error.type; a delete that fails omits the template keys.
+      most labels. A suspend and a pause have no ate.snapshot.kind. A revert has
+      no snapshot key. A create and a delete have only the operation, the
+      template and error.type. A delete that fails omits the template keys;
+      when resume, suspend, pause or revert fails before ateapi reads the
+      actor, the template keys hold the empty string.
     annotations:
       substrate:
         emitted_by: [ateapi]
@@ -815,7 +824,10 @@ groups:
           conditionally_required: The actor has a worker.
       - ref: ate.sandbox.class
         requirement_level:
-          conditionally_required: The operation is not create or delete, and ateapi found the ActorTemplate.
+          conditionally_required: >
+            The operation is resume, suspend, pause or revert, and ateapi found
+            the ActorTemplate. A revert continues when the ActorTemplate no
+            longer exists, and then omits this key.
       - ref: ate.snapshot.kind
         requirement_level:
           conditionally_required: The operation is a resume and the snapshot source is known. Other operations do not restore, thus this key is absent.
