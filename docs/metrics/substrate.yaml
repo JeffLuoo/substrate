@@ -124,9 +124,9 @@ bridged_metric_families:
 # -----------------------------------------------------------------------------
 # The rules that keep the number of series small
 #
-# No rule is enforced at this time. This PR adds the registry only. Each rule
-# says what could enforce it, so that a reader knows the difference between a
-# rule that a machine holds and a rule that a person holds.
+# No rule is enforced at this time. Each rule says what could enforce it, so
+# that a reader knows the difference between a rule that a machine holds and a
+# rule that a person holds.
 # -----------------------------------------------------------------------------
 cardinality_rules:
   - id: no-actor-identity
