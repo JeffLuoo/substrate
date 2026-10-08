@@ -9,12 +9,12 @@
         "width": 6,
         "height": 4,
         "widget": {
-          "title": "Substrate routing latency — P50/P95/P99",
+          "title": "Substrate routing latency, warm route (resume none) — P50/P95/P99",
           "xyChart": {
             "dataSets": [
               {
                 "timeSeriesQuery": {
-                  "prometheusQuery": "histogram_quantile(0.50, sum by (le) (rate({\"atenet.router.route.duration_bucket\", top_level_controller_name=\"atenet-router\"}[5m])))",
+                  "prometheusQuery": "histogram_quantile(0.50, sum by (le) (rate({\"atenet.router.route.duration_bucket\", top_level_controller_name=\"atenet-router\", \"ate.router.resume\"=\"none\"}[5m])))",
                   "unitOverride": "s"
                 },
                 "plotType": "LINE",
@@ -23,7 +23,7 @@
               },
               {
                 "timeSeriesQuery": {
-                  "prometheusQuery": "histogram_quantile(0.95, sum by (le) (rate({\"atenet.router.route.duration_bucket\", top_level_controller_name=\"atenet-router\"}[5m])))",
+                  "prometheusQuery": "histogram_quantile(0.95, sum by (le) (rate({\"atenet.router.route.duration_bucket\", top_level_controller_name=\"atenet-router\", \"ate.router.resume\"=\"none\"}[5m])))",
                   "unitOverride": "s"
                 },
                 "plotType": "LINE",
@@ -32,7 +32,7 @@
               },
               {
                 "timeSeriesQuery": {
-                  "prometheusQuery": "histogram_quantile(0.99, sum by (le) (rate({\"atenet.router.route.duration_bucket\", top_level_controller_name=\"atenet-router\"}[5m])))",
+                  "prometheusQuery": "histogram_quantile(0.99, sum by (le) (rate({\"atenet.router.route.duration_bucket\", top_level_controller_name=\"atenet-router\", \"ate.router.resume\"=\"none\"}[5m])))",
                   "unitOverride": "s"
                 },
                 "plotType": "LINE",
@@ -53,26 +53,70 @@
         "width": 6,
         "height": 4,
         "widget": {
-          "title": "Substrate routing latency P99 - by stages",
+          "title": "Substrate activation latency (resume triggered) — P50/P95/P99",
           "xyChart": {
             "dataSets": [
               {
                 "timeSeriesQuery": {
-                  "prometheusQuery": "histogram_quantile(0.99, sum by (le) (rate({\"atenet.router.route.duration_bucket\", top_level_controller_name=\"atenet-router\"}[5m])))",
+                  "prometheusQuery": "histogram_quantile(0.50, sum by (le) (rate({\"atenet.router.route.duration_bucket\", top_level_controller_name=\"atenet-router\", \"ate.router.resume\"=\"triggered\"}[5m])))",
                   "unitOverride": "s"
                 },
                 "plotType": "LINE",
                 "targetAxis": "Y1",
-                "legendTemplate": "substrate routing P99"
+                "legendTemplate": "P50"
               },
               {
                 "timeSeriesQuery": {
-                  "prometheusQuery": "histogram_quantile(0.99, sum by (le) (rate({\"rpc.server.call.duration_bucket\", top_level_controller_name=\"ate-api-server\", \"rpc.method\"=\"ateapi.Control/ResumeActor\"}[5m])))",
+                  "prometheusQuery": "histogram_quantile(0.95, sum by (le) (rate({\"atenet.router.route.duration_bucket\", top_level_controller_name=\"atenet-router\", \"ate.router.resume\"=\"triggered\"}[5m])))",
                   "unitOverride": "s"
                 },
                 "plotType": "LINE",
                 "targetAxis": "Y1",
-                "legendTemplate": "ateapi ResumeActor P99"
+                "legendTemplate": "P95"
+              },
+              {
+                "timeSeriesQuery": {
+                  "prometheusQuery": "histogram_quantile(0.99, sum by (le) (rate({\"atenet.router.route.duration_bucket\", top_level_controller_name=\"atenet-router\", \"ate.router.resume\"=\"triggered\"}[5m])))",
+                  "unitOverride": "s"
+                },
+                "plotType": "LINE",
+                "targetAxis": "Y1",
+                "legendTemplate": "P99"
+              }
+            ],
+            "yAxis": {
+              "label": "seconds",
+              "scale": "LINEAR"
+            }
+          }
+        }
+      },
+      {
+        "xPos": 0,
+        "yPos": 4,
+        "width": 6,
+        "height": 4,
+        "widget": {
+          "title": "Substrate activation latency P99 — by stages",
+          "xyChart": {
+            "dataSets": [
+              {
+                "timeSeriesQuery": {
+                  "prometheusQuery": "histogram_quantile(0.99, sum by (le) (rate({\"atenet.router.route.duration_bucket\", top_level_controller_name=\"atenet-router\", \"ate.router.resume\"=\"triggered\"}[5m])))",
+                  "unitOverride": "s"
+                },
+                "plotType": "LINE",
+                "targetAxis": "Y1",
+                "legendTemplate": "substrate activation P99"
+              },
+              {
+                "timeSeriesQuery": {
+                  "prometheusQuery": "histogram_quantile(0.99, sum by (le) (rate({\"ate.actor.lifecycle.operation.duration_bucket\", top_level_controller_name=\"ate-api-server\", \"ate.actor.operation.name\"=\"resume\"}[5m])))",
+                  "unitOverride": "s"
+                },
+                "plotType": "LINE",
+                "targetAxis": "Y1",
+                "legendTemplate": "ateapi resume P99"
               },
               {
                 "timeSeriesQuery": {
@@ -92,17 +136,17 @@
         }
       },
       {
-        "xPos": 0,
+        "xPos": 6,
         "yPos": 4,
         "width": 6,
         "height": 4,
         "widget": {
-          "title": "Substrate routing latency P99 — by ActorTemplate",
+          "title": "Substrate routing latency P99 — by ActorTemplate and resume",
           "xyChart": {
             "dataSets": [
               {
                 "timeSeriesQuery": {
-                  "prometheusQuery": "histogram_quantile(0.99, sum by (le, \"ate.template.name\") (rate({\"atenet.router.route.duration_bucket\", top_level_controller_name=\"atenet-router\", \"ate.router.outcome\"=\"ok\"}[5m])))",
+                  "prometheusQuery": "histogram_quantile(0.99, sum by (le, \"ate.template.atespace\", \"ate.template.name\", \"ate.router.resume\") (rate({\"atenet.router.route.duration_bucket\", top_level_controller_name=\"atenet-router\", \"ate.router.outcome\"=\"ok\", \"ate.router.resume\"=~\"none|triggered\"}[5m])))",
                   "unitOverride": "s"
                 },
                 "plotType": "LINE",
@@ -117,9 +161,9 @@
         }
       },
       {
-        "xPos": 6,
-        "yPos": 4,
-        "width": 6,
+        "xPos": 0,
+        "yPos": 8,
+        "width": 12,
         "height": 4,
         "widget": {
           "title": "Substrate routing QPS - by Status",
@@ -143,7 +187,7 @@
       },
       {
         "xPos": 0,
-        "yPos": 8,
+        "yPos": 12,
         "width": 6,
         "height": 4,
         "widget": {
@@ -187,7 +231,7 @@
       },
       {
         "xPos": 6,
-        "yPos": 8,
+        "yPos": 12,
         "width": 6,
         "height": 4,
         "widget": {

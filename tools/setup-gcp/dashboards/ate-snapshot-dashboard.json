@@ -9,12 +9,12 @@
         "width": 6,
         "height": 4,
         "widget": {
-          "title": "Substrate — snapshot image size P99 by ActorTemplate",
+          "title": "Substrate — memory image size P99 by ActorTemplate",
           "xyChart": {
             "dataSets": [
               {
                 "timeSeriesQuery": {
-                  "prometheusQuery": "histogram_quantile(0.99, sum by (le, \"ate.template.name\") (rate({\"atelet.snapshot.size_bucket\", top_level_controller_name=~\"atelet-.*\", \"file.name\"=\"pages.img\"}[1h])))",
+                  "prometheusQuery": "histogram_quantile(0.99, sum by (le, \"ate.template.atespace\", \"ate.template.name\", \"file.name\") (rate({\"atelet.snapshot.size_bucket\", top_level_controller_name=~\"atelet-.*\", \"file.name\"=~\"pages.img|memory-ranges\"}[1h])))",
                   "unitOverride": "By"
                 },
                 "plotType": "LINE",
@@ -34,35 +34,62 @@
         "width": 6,
         "height": 4,
         "widget": {
-          "title": "Substrate — snapshot image size P50/P95/P99",
+          "title": "Substrate — memory image size P50/P95/P99",
           "xyChart": {
             "dataSets": [
               {
                 "timeSeriesQuery": {
-                  "prometheusQuery": "histogram_quantile(0.50, sum by (le) (rate({\"atelet.snapshot.size_bucket\", top_level_controller_name=~\"atelet-.*\"}[1h])))",
+                  "prometheusQuery": "histogram_quantile(0.50, sum by (le) (rate({\"atelet.snapshot.size_bucket\", top_level_controller_name=~\"atelet-.*\", \"file.name\"=\"pages.img\"}[1h])))",
                   "unitOverride": "By"
                 },
                 "plotType": "LINE",
                 "targetAxis": "Y1",
-                "legendTemplate": "P50"
+                "legendTemplate": "gVisor pages.img P50"
               },
               {
                 "timeSeriesQuery": {
-                  "prometheusQuery": "histogram_quantile(0.95, sum by (le) (rate({\"atelet.snapshot.size_bucket\", top_level_controller_name=~\"atelet-.*\"}[1h])))",
+                  "prometheusQuery": "histogram_quantile(0.95, sum by (le) (rate({\"atelet.snapshot.size_bucket\", top_level_controller_name=~\"atelet-.*\", \"file.name\"=\"pages.img\"}[1h])))",
                   "unitOverride": "By"
                 },
                 "plotType": "LINE",
                 "targetAxis": "Y1",
-                "legendTemplate": "P95"
+                "legendTemplate": "gVisor pages.img P95"
               },
               {
                 "timeSeriesQuery": {
-                  "prometheusQuery": "histogram_quantile(0.99, sum by (le) (rate({\"atelet.snapshot.size_bucket\", top_level_controller_name=~\"atelet-.*\"}[1h])))",
+                  "prometheusQuery": "histogram_quantile(0.99, sum by (le) (rate({\"atelet.snapshot.size_bucket\", top_level_controller_name=~\"atelet-.*\", \"file.name\"=\"pages.img\"}[1h])))",
                   "unitOverride": "By"
                 },
                 "plotType": "LINE",
                 "targetAxis": "Y1",
-                "legendTemplate": "P99"
+                "legendTemplate": "gVisor pages.img P99"
+              },
+              {
+                "timeSeriesQuery": {
+                  "prometheusQuery": "histogram_quantile(0.50, sum by (le) (rate({\"atelet.snapshot.size_bucket\", top_level_controller_name=~\"atelet-.*\", \"file.name\"=\"memory-ranges\"}[1h])))",
+                  "unitOverride": "By"
+                },
+                "plotType": "LINE",
+                "targetAxis": "Y1",
+                "legendTemplate": "micro-VM memory-ranges P50"
+              },
+              {
+                "timeSeriesQuery": {
+                  "prometheusQuery": "histogram_quantile(0.95, sum by (le) (rate({\"atelet.snapshot.size_bucket\", top_level_controller_name=~\"atelet-.*\", \"file.name\"=\"memory-ranges\"}[1h])))",
+                  "unitOverride": "By"
+                },
+                "plotType": "LINE",
+                "targetAxis": "Y1",
+                "legendTemplate": "micro-VM memory-ranges P95"
+              },
+              {
+                "timeSeriesQuery": {
+                  "prometheusQuery": "histogram_quantile(0.99, sum by (le) (rate({\"atelet.snapshot.size_bucket\", top_level_controller_name=~\"atelet-.*\", \"file.name\"=\"memory-ranges\"}[1h])))",
+                  "unitOverride": "By"
+                },
+                "plotType": "LINE",
+                "targetAxis": "Y1",
+                "legendTemplate": "micro-VM memory-ranges P99"
               }
             ],
             "yAxis": {
@@ -83,7 +110,7 @@
             "dataSets": [
               {
                 "timeSeriesQuery": {
-                  "prometheusQuery": "sum by (\"ate.template.name\") (rate({\"atelet.snapshot.size_count\", top_level_controller_name=~\"atelet-.*\", \"file.name\"=\"pages.img\"}[1h]))",
+                  "prometheusQuery": "sum by (\"ate.template.atespace\", \"ate.template.name\") (rate({\"atelet.snapshot.size_count\", top_level_controller_name=~\"atelet-.*\", \"file.name\"=~\"pages.img|memory-ranges\"}[1h]))",
                   "unitOverride": "1/s"
                 },
                 "plotType": "LINE",
@@ -103,7 +130,7 @@
         "width": 12,
         "height": 4,
         "widget": {
-          "title": "Substrate — snapshot (pages) size distribution (heatmap)",
+          "title": "Substrate — gVisor memory image (pages.img) size distribution (heatmap)",
           "xyChart": {
             "dataSets": [
               {
