@@ -794,12 +794,8 @@ groups:
     note: >
       ateapi does not record a resume of an actor that is already in operation.
       Thus this histogram counts the true activations and not the traffic of the
-      router. The set of labels changes with the operation. A resume has the
-      most labels. A suspend and a pause have no ate.snapshot.kind. A revert has
-      no snapshot key. A create and a delete have only the operation, the
-      template and error.type. A delete that fails omits the template keys;
-      when resume, suspend, pause or revert fails before ateapi reads the
-      actor, the template keys hold the empty string.
+      router. The set of labels changes with the operation. Each attribute
+      below gives the condition for its key.
     annotations:
       substrate:
         emitted_by: [ateapi]
@@ -812,16 +808,24 @@ groups:
         requirement_level: required
       - ref: ate.template.atespace
         requirement_level:
-          conditionally_required: The operation is not a delete that failed.
+          conditionally_required: >
+            The operation is a create, or ateapi loaded the actor. Thus this key
+            is absent when a delete fails or when the load step fails. For a
+            resume, a suspend and a pause, the load step also reads the
+            ActorTemplate.
       - ref: ate.template.name
         requirement_level:
-          conditionally_required: The operation is not a delete that failed.
+          conditionally_required: >
+            The operation is a create, or ateapi loaded the actor. Thus this key
+            is absent when a delete fails or when the load step fails. For a
+            resume, a suspend and a pause, the load step also reads the
+            ActorTemplate.
       - ref: ate.workerpool.namespace
         requirement_level:
-          conditionally_required: The actor has a worker.
+          conditionally_required: The operation is not a create or a delete, and the actor has a worker.
       - ref: ate.workerpool.name
         requirement_level:
-          conditionally_required: The actor has a worker.
+          conditionally_required: The operation is not a create or a delete, and the actor has a worker.
       - ref: ate.sandbox.class
         requirement_level:
           conditionally_required: >
@@ -1270,7 +1274,9 @@ groups:
     note: >
       The otelgrpc interceptor sends this instrument. The code of Substrate does
       not make it. This instrument is the only metric of ateom. ateom has it on
-      the gRPC interface that atelet calls.
+      the gRPC interface that atelet calls. credprovider is the
+      kubernetes-secrets credential provider in
+      cmd/credential-provider/kubernetes-secrets.
     annotations:
       substrate:
         emitted_by: [ateapi, atelet, atenet-router, ateom-gvisor, ateom-microvm, credprovider]
