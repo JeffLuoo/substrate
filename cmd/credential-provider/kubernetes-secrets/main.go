@@ -89,9 +89,7 @@ func run(ctx context.Context) error {
 	}
 	defer serverboot.ShutdownProvider("MeterProvider", mp.Shutdown)
 
-	readiness := &serverboot.Readiness{}
 	go serverboot.StartMetricsServer(ctx, *metricsAddr)
-	go serverboot.StartHealthServer(ctx, *healthAddr, readiness)
 
 	client, err := newKubeClient()
 	if err != nil {
@@ -126,6 +124,11 @@ func run(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("listen on %s: %w", *listenAddr, err)
 	}
+
+	// The health server starts after the gRPC listener opens, so /readyz does
+	// not report 200 before the pod can accept calls.
+	readiness := &serverboot.Readiness{}
+	go serverboot.StartHealthServer(ctx, *healthAddr, readiness)
 
 	shutdownCtx, stop := signal.NotifyContext(ctx, syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
