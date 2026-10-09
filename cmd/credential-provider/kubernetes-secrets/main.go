@@ -50,7 +50,8 @@ const serviceName = "credprovider"
 
 var (
 	listenAddr   = pflag.String("listen-address", ":50051", "gRPC listen address")
-	metricsAddr  = pflag.String("metrics-address", ":9090", "Prometheus/health HTTP listen address")
+	metricsAddr  = pflag.String("metrics-address", ":9090", "Prometheus /metrics HTTP listen address")
+	healthAddr   = pflag.String("health-address", ":9091", "/readyz and /healthz HTTP listen address")
 	statusAddr   = pflag.String("status-address", ":4040", "/statusz HTTP listen address; empty disables the page")
 	serverBundle = pflag.String("server-cred-bundle", "", "credential bundle (PEM key+chain) presented for serving TLS (required)")
 	clientCAFile = pflag.String("client-ca-file", "", "CA bundle that caller (injector) client certificates must chain to (required)")
@@ -89,11 +90,8 @@ func run(ctx context.Context) error {
 	defer serverboot.ShutdownProvider("MeterProvider", mp.Shutdown)
 
 	readiness := &serverboot.Readiness{}
-	go serverboot.StartMetricsServer(ctx, serverboot.MetricsServerOptions{
-		Addr:          *metricsAddr,
-		Readiness:     readiness,
-		EnableHealthz: true,
-	})
+	go serverboot.StartMetricsServer(ctx, *metricsAddr)
+	go serverboot.StartHealthServer(ctx, *healthAddr, readiness)
 
 	client, err := newKubeClient()
 	if err != nil {
