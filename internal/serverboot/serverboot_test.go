@@ -229,7 +229,7 @@ func TestMeterProviderDropsRPCServerAddress(t *testing.T) {
 	}
 	attrs := points[0].Attributes
 	if v, ok := attrs.Value("server.address"); ok {
-		t.Errorf("server.address = %q, want absent", v.Emit())
+		t.Errorf("server.address = %q, want absent", v.String())
 	}
 	for _, key := range []attribute.Key{"server.port", "rpc.method"} {
 		if _, ok := attrs.Value(key); !ok {
