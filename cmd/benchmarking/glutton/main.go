@@ -65,7 +65,7 @@ func main() {
 	}
 	defer serverboot.ShutdownProvider("TracerProvider", tp.Shutdown)
 
-	mp, err := serverboot.InitMetrics(ctx, glutton.Name)
+	mp, servePull, err := serverboot.InitMetrics(ctx, glutton.Name)
 	if err != nil {
 		serverboot.Fatal(ctx, "Failed to initialize metrics", err)
 	}
@@ -93,7 +93,9 @@ func main() {
 		serverboot.Fatal(ctx, "Failed to start listener", fmt.Errorf("%s: %w", *listenAddr, err))
 	}
 
-	go serverboot.StartMetricsServer(ctx, *metricsListenAddr)
+	if servePull {
+		go serverboot.StartMetricsServer(ctx, *metricsListenAddr)
+	}
 
 	slog.InfoContext(ctx, "glutton starting",
 		slog.String("listen-addr", *listenAddr),
