@@ -364,9 +364,9 @@ func (r *Readiness) MarkNotReady() { r.notReady.Store(true) }
 // Ready reports whether /readyz returns 200.
 func (r *Readiness) Ready() bool { return !r.notReady.Load() }
 
-// probeServerReadHeaderTimeout bounds how long a client can take to send the
+// httpServerReadHeaderTimeout bounds how long a client can take to send the
 // request headers, so a slow client cannot hold a connection open forever.
-const probeServerReadHeaderTimeout = 10 * time.Second
+const httpServerReadHeaderTimeout = 10 * time.Second
 
 // StartMetricsServer runs an HTTP server exposing only /metrics
 // (Prometheus). Blocks until the server stops; designed to be `go`-launched.
@@ -407,7 +407,7 @@ func newHTTPServer(addr string, handler http.Handler) *http.Server {
 	return &http.Server{
 		Addr:              addr,
 		Handler:           handler,
-		ReadHeaderTimeout: probeServerReadHeaderTimeout,
+		ReadHeaderTimeout: httpServerReadHeaderTimeout,
 	}
 }
 
