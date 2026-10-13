@@ -99,7 +99,6 @@ func main() {
 
 	slog.InfoContext(ctx, "glutton starting",
 		slog.String("listen-addr", *listenAddr),
-		slog.String("metrics-listen-addr", *metricsListenAddr),
 		slog.String("data-dir", *dataDir),
 		slog.String("mode", *mode),
 	)
