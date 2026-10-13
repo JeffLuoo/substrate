@@ -703,6 +703,27 @@ groups:
         type: string
         brief: The gRPC status that the server returned.
         examples: ["OK", "RESOURCE_EXHAUSTED"]
+      - id: rpc.system.name
+        stability: stable
+        type: string
+        brief: The RPC system. otelgrpc always sets the value grpc.
+        examples: ["grpc"]
+      - id: server.address
+        stability: stable
+        type: string
+        brief: >
+          The address of the server that a gRPC client called. otelgrpc reads it
+          from the remote address of the connection, so it holds an IP address
+          and not the name in the dial target. For a unix socket it holds the
+          path of the socket. atelet calls each ateom on a socket path that holds
+          the UID of the worker pod, so on atelet this key has one value for
+          each worker pod.
+        examples: ["10.8.2.14", "/var/lib/ate/ateoms/<pod-uid>/ateom.sock"]
+      - id: server.port
+        stability: stable
+        type: int
+        brief: The TCP port of the server that a gRPC client called.
+        examples: [8085]
 
   # ---------------------------------------------------------------------------
   # Metrics. ateapi
@@ -1286,6 +1307,8 @@ groups:
         code_anchor: cmd/atenet/internal/router/xds.go
         cuj: Which RPC is slow or fails, and on which component?
     attributes:
+      - ref: rpc.system.name
+        requirement_level: required
       - ref: rpc.method
         requirement_level: required
       - ref: rpc.response.status_code
@@ -1312,10 +1335,18 @@ groups:
         code_anchor: cmd/ateapi/internal/controlapi/dialer.go
         cuj: A component waits on another component. Which call, and for how long?
     attributes:
+      - ref: rpc.system.name
+        requirement_level: required
       - ref: rpc.method
         requirement_level: required
       - ref: rpc.response.status_code
         requirement_level: required
+      - ref: server.address
+        requirement_level:
+          conditionally_required: The client sent the request headers on a connection.
+      - ref: server.port
+        requirement_level:
+          conditionally_required: The client called the server over TCP. A call on a unix socket has no port.
   # ---------------------------------------------------------------------------
   # The metrics that Substrate exports but does not define
   #
