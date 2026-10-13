@@ -28,6 +28,7 @@ import (
 	"net/http"
 	"os"
 	"sync/atomic"
+	"time"
 
 	"github.com/agent-substrate/substrate/internal/ateattr"
 	"github.com/agent-substrate/substrate/internal/contextlogging"
@@ -363,41 +364,50 @@ func (r *Readiness) MarkNotReady() { r.notReady.Store(true) }
 // Ready reports whether /readyz returns 200.
 func (r *Readiness) Ready() bool { return !r.notReady.Load() }
 
+// probeServerReadHeaderTimeout bounds how long a client can take to send the
+// request headers, so a slow client cannot hold a connection open forever.
+const probeServerReadHeaderTimeout = 10 * time.Second
+
 // StartMetricsServer runs an HTTP server exposing only /metrics
-// (Prometheus). Blocks until http.ListenAndServe returns; designed to be
-// `go`-launched. The kubelet probes use StartHealthServer, so a change to the
-// metrics endpoint does not change the health checks.
+// (Prometheus). Blocks until the server stops; designed to be `go`-launched.
+// The kubelet probes use StartHealthServer, so a change to the metrics
+// endpoint does not change the health checks. A serve failure exits the
+// process: the probes no longer report a metrics server that cannot bind, so
+// without the exit the only sign of the failure is one log line.
 func StartMetricsServer(ctx context.Context, addr string) {
 	slog.InfoContext(ctx, "Starting metrics HTTP server", slog.String("addr", addr))
-	if err := http.ListenAndServe(addr, metricsMux()); err != nil {
-		slog.Error("Failed to start prometheus metrics server", slog.Any("err", err))
+	if err := listenAndServe(addr, metricsMux()); err != nil {
+		slog.Error("Metrics HTTP server failed", slog.Any("err", err))
+		os.Exit(1)
 	}
 }
 
 // StartHealthServer runs an HTTP server exposing /readyz and /healthz for the
 // kubelet probes. /readyz returns 200 while readiness is Ready and 503 after
 // MarkNotReady. /healthz always returns 200, so liveness keeps succeeding
-// while a draining server fails readiness. Blocks until http.ListenAndServe
-// returns; designed to be `go`-launched. A serve failure exits the process:
-// the probes can never succeed, so dying loudly lets the kubelet restart it.
+// while a draining server fails readiness. Blocks until the server stops;
+// designed to be `go`-launched. A serve failure exits the process: a pod whose
+// probes can never succeed never turns Ready, so dying loudly lets the kubelet
+// restart it instead of leaving a pod that looks alive but never gets work.
 func StartHealthServer(ctx context.Context, addr string, readiness *Readiness) {
 	slog.InfoContext(ctx, "Starting health HTTP server", slog.String("addr", addr))
-	if err := http.ListenAndServe(addr, healthMux(readiness)); err != nil {
+	if err := listenAndServe(addr, healthMux(readiness)); err != nil {
 		slog.Error("Health HTTP server failed", slog.Any("err", err))
 		os.Exit(1)
 	}
 }
 
-// StartReadinessServer runs an HTTP server exposing only /readyz. Blocks until
-// http.ListenAndServe returns; designed to be `go`-launched. A serve failure
-// exits the process: a worker whose readiness endpoint cannot come up never
-// turns Ready and never registers, so dying loudly lets the kubelet restart it
-// instead of leaving a pod that looks alive but can never receive work.
-func StartReadinessServer(ctx context.Context, addr string, readiness *Readiness) {
-	slog.InfoContext(ctx, "Starting readiness HTTP server", slog.String("addr", addr))
-	if err := http.ListenAndServe(addr, readinessMux(readiness)); err != nil {
-		slog.Error("Readiness HTTP server failed", slog.Any("err", err))
-		os.Exit(1)
+func listenAndServe(addr string, handler http.Handler) error {
+	return newHTTPServer(addr, handler).ListenAndServe()
+}
+
+// newHTTPServer builds the server for StartMetricsServer and
+// StartHealthServer; split out so tests can check its timeouts.
+func newHTTPServer(addr string, handler http.Handler) *http.Server {
+	return &http.Server{
+		Addr:              addr,
+		Handler:           handler,
+		ReadHeaderTimeout: probeServerReadHeaderTimeout,
 	}
 }
 
@@ -417,13 +427,6 @@ func healthMux(readiness *Readiness) *http.ServeMux {
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("ok"))
 	})
-	return mux
-}
-
-// readinessMux builds the handler for StartReadinessServer.
-func readinessMux(readiness *Readiness) *http.ServeMux {
-	mux := http.NewServeMux()
-	mux.Handle("/readyz", readinessHandler(readiness))
 	return mux
 }
 

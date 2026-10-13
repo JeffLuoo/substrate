@@ -152,6 +152,9 @@ func main() {
 		serverboot.Fatal(ctx, "Failed to initialize metrics", err)
 	}
 	defer serverboot.ShutdownProvider("MeterProvider", mp.Shutdown)
+	// The probes have their own server, so /metrics starts here and serves
+	// during the store connect and the schema migrations.
+	go serverboot.StartMetricsServer(ctx, *metricsListenAddr)
 
 	lp, err := serverboot.InitLogging(ctx, serverboot.LoggingOptions{
 		ServiceName: "ateapi",
@@ -351,7 +354,6 @@ func main() {
 	ateapipb.RegisterWorkerServiceServer(mux, workerservice.New(persistence, controlSrv, ateletSPIFFEID, actorIDCAPool))
 
 	readiness := &serverboot.Readiness{}
-	go serverboot.StartMetricsServer(ctx, *metricsListenAddr)
 	go serverboot.StartHealthServer(ctx, *healthListenAddr, readiness)
 
 	drainDone := drainOnShutdown(shutdownCtx, mux, readiness)
