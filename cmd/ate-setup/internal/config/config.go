@@ -219,6 +219,12 @@ type Config struct {
 	// AdditionalEgressExtprocService is the optional NS/SVC:PORT external processor filter.
 	AdditionalEgressExtprocService string
 
+	// AdditionalEgressExtprocFiltersFile is an optional local YAML file
+	// (ATE_ADDITIONAL_EGRESS_EXTPROC_FILTERS_FILE) whose ext_proc filters
+	// replace the default filter spliced for AdditionalEgressExtprocService.
+	// It is read when the egress manifest is rendered.
+	AdditionalEgressExtprocFiltersFile string
+
 	// CredentialProviderJSON is the --credential-provider value; see
 	// CredentialProvider for its schema.
 	CredentialProviderJSON string
@@ -478,6 +484,9 @@ func (c *Config) ScriptEnv() []string {
 	}
 	if c.AdditionalEgressExtprocService != "" {
 		merged["ATE_ADDITIONAL_EGRESS_EXTPROC_SERVICE"] = c.AdditionalEgressExtprocService
+	}
+	if c.AdditionalEgressExtprocFiltersFile != "" {
+		merged["ATE_ADDITIONAL_EGRESS_EXTPROC_FILTERS_FILE"] = c.AdditionalEgressExtprocFiltersFile
 	}
 	if c.CredentialProviderJSON != "" {
 		merged["ATE_CREDENTIAL_PROVIDER"] = c.CredentialProviderJSON

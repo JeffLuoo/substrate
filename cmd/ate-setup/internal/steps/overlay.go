@@ -24,6 +24,8 @@ import (
 	"strings"
 	"time"
 
+	"sigs.k8s.io/yaml"
+
 	"go.ate.dev/substrate/cmd/ate-setup/internal/config"
 	"go.ate.dev/substrate/cmd/ate-setup/internal/kustomize"
 	"go.ate.dev/substrate/cmd/ate-setup/internal/log"
@@ -362,6 +364,12 @@ func (e *Env) patchAtenetEgressManifest() ([]byte, error) {
 	serverName := fmt.Sprintf("%s.%s.svc", service, namespace)
 
 	filterBlock := emitAdditionalEgressExtprocFilter()
+	if path := e.Cfg.AdditionalEgressExtprocFiltersFile; path != "" {
+		filterBlock, err = loadAdditionalEgressExtprocFilters(path)
+		if err != nil {
+			return nil, err
+		}
+	}
 	clusterBlock := emitAdditionalEgressExtprocCluster(address, port, serverName)
 
 	lines := strings.Split(string(raw), "\n")
@@ -407,6 +415,64 @@ func (e *Env) patchAtenetEgressManifest() ([]byte, error) {
 }
 
 const additionalEgressExtprocCluster = "additional_egress_ext_proc"
+
+// extProcFilterType is the typed_config of an ext_proc HTTP filter.
+const extProcFilterType = "type.googleapis.com/envoy.extensions.filters.http.ext_proc.v3.ExternalProcessor"
+
+// loadAdditionalEgressExtprocFilters reads the filters an operator splices in
+// place of emitAdditionalEgressExtprocFilter: for example a synchronous filter
+// that may hold a request on its headers, followed by an observability-mode
+// filter that streams response bodies. It returns them as a YAML list for the
+// filter markers.
+//
+// Each filter must be an ext_proc filter that dials the
+// additional_egress_ext_proc cluster. The file configures what the additional
+// processor sees and how long Envoy waits for it; it cannot add other filters
+// to the egress chains or point them at another cluster.
+func loadAdditionalEgressExtprocFilters(path string) (string, error) {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return "", fmt.Errorf("reading additional ext_proc filters: %w", err)
+	}
+	var filters []map[string]any
+	if err := yaml.UnmarshalStrict(raw, &filters); err != nil {
+		return "", fmt.Errorf("additional ext_proc filters in %s: want a YAML list of filters: %w", path, err)
+	}
+	if len(filters) == 0 {
+		return "", fmt.Errorf("additional ext_proc filters in %s: the list is empty", path)
+	}
+	for i, f := range filters {
+		if name, _ := f["name"].(string); name != "envoy.filters.http.ext_proc" {
+			return "", fmt.Errorf("additional ext_proc filters in %s: filter %d is %q, want envoy.filters.http.ext_proc", path, i+1, name)
+		}
+		typedConfig, _ := f["typed_config"].(map[string]any)
+		if got, _ := typedConfig["@type"].(string); got != extProcFilterType {
+			return "", fmt.Errorf("additional ext_proc filters in %s: filter %d has typed_config @type %q, want %s", path, i+1, got, extProcFilterType)
+		}
+		if got := extProcCluster(f); got != additionalEgressExtprocCluster {
+			return "", fmt.Errorf("additional ext_proc filters in %s: filter %d dials %q, want grpc_service.envoy_grpc.cluster_name %s",
+				path, i+1, got, additionalEgressExtprocCluster)
+		}
+	}
+	out, err := yaml.Marshal(filters)
+	if err != nil {
+		return "", fmt.Errorf("additional ext_proc filters in %s: %w", path, err)
+	}
+	return strings.TrimRight(string(out), "\n"), nil
+}
+
+// extProcCluster returns the cluster an ext_proc filter dials, or "" for any
+// other filter.
+func extProcCluster(filter map[string]any) string {
+	if filter["name"] != "envoy.filters.http.ext_proc" {
+		return ""
+	}
+	typedConfig, _ := filter["typed_config"].(map[string]any)
+	grpcService, _ := typedConfig["grpc_service"].(map[string]any)
+	envoyGRPC, _ := grpcService["envoy_grpc"].(map[string]any)
+	name, _ := envoyGRPC["cluster_name"].(string)
+	return name
+}
 
 func emitAdditionalEgressExtprocFilter() string {
 	return `- name: envoy.filters.http.ext_proc

@@ -74,6 +74,11 @@ ActorTemplate, worker pool, test, and manual walkthrough are otherwise the same.
 
 The experimental additional egress `ext_proc` service currently requires Envoy; the installer
 rejects that option with agentgateway rather than silently omitting it.
+By default its filter sends the processor request headers only and waits 2s for each reply.
+`--experimental-additional-egress-extproc-filters-file` replaces that filter with ext_proc
+filters you list, for example one that may hold a request on its headers and one that
+streams response bodies in observability mode; each must dial the `additional_egress_ext_proc`
+cluster.
 
 ## Components
 

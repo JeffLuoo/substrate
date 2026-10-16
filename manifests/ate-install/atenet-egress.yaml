@@ -295,10 +295,11 @@ data:
       # #ATE_MITM_EXTPROC_CLUSTER in the cluster list: inert comments until
       # hack/install-ate.sh is run with
       # --experimental-additional-egress-extproc-service, which replaces each
-      # with a generated block for an additional, external processor. The
-      # marker sits below the policy filter, so that processor sees only
-      # requests the policy allowed, including any headers the policy added; a
-      # request the policy denies never reaches it.
+      # with a generated block for an additional, external processor, or with
+      # the filters --experimental-additional-egress-extproc-filters-file
+      # lists. The marker sits below the policy filter, so that processor sees
+      # only requests the policy allowed, including any headers the policy
+      # added; a request the policy denies never reaches it.
       #
       # The passthrough chain is a tcp_proxy, so it has no HTTP filters of its
       # own, and it decides nothing: it dials the address the CONNECT leg

@@ -210,6 +210,11 @@ func TestValidationErrorsNameTheSupplyingChannel(t *testing.T) {
 			wantIn: []string{"atenet.egress.additionalExtprocService", "1-65535", "ATE_ADDITIONAL_EGRESS_EXTPROC_SERVICE"},
 		},
 		{
+			name:   "extproc filters without a service",
+			env:    map[string]string{"ATE_ADDITIONAL_EGRESS_EXTPROC_FILTERS_FILE": "filters.yaml"},
+			wantIn: []string{"atenet.egress.additionalExtprocFiltersFile", "ATE_ADDITIONAL_EGRESS_EXTPROC_FILTERS_FILE", "atenet.egress.additionalExtprocService", "additional_egress_ext_proc"},
+		},
+		{
 			name:   "image tag without a repository",
 			env:    map[string]string{"ATE_IMAGE_TAG": "v1"},
 			wantIn: []string{"images.tag", "ATE_IMAGE_TAG", "images.repo", "the tag names nothing"},

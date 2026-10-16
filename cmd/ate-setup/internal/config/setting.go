@@ -161,6 +161,13 @@ var Registry = []Setting{
 		Usage: "Run an additional ext_proc authorization filter served by NS/SVC:PORT " +
 			"(requires --atenet-dataplane=envoy)",
 	},
+	{
+		Key: "atenet.egress.additionalExtprocFiltersFile", Env: "ATE_ADDITIONAL_EGRESS_EXTPROC_FILTERS_FILE",
+		Flag: "experimental-additional-egress-extproc-filters-file", Kind: KindString,
+		Usage: "Local YAML file listing the ext_proc filters spliced in place of the default additional " +
+			"filter; each must dial the additional_egress_ext_proc cluster " +
+			"(requires --experimental-additional-egress-extproc-service)",
+	},
 
 	{
 		// No default: an unset level keeps the one an existing install has,

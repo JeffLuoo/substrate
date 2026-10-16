@@ -287,6 +287,170 @@ func TestPatchAtenetEgressManifest(t *testing.T) {
 	}
 }
 
+// meterAndGateFilters is a filters file in the shape the option is for: a
+// gate that can extend Envoy's wait while it holds a request, then a meter
+// that streams response bodies without delaying them.
+const meterAndGateFilters = `- name: envoy.filters.http.ext_proc
+  typed_config:
+    "@type": type.googleapis.com/envoy.extensions.filters.http.ext_proc.v3.ExternalProcessor
+    grpc_service:
+      envoy_grpc:
+        cluster_name: additional_egress_ext_proc
+    failure_mode_allow: true
+    message_timeout: 2s
+    max_message_timeout: 120s
+    request_attributes:
+    - filter_state['dev.ate.actor.identity']
+    forward_rules:
+      disallowed_headers:
+        patterns:
+        - exact: authorization
+        - exact: x-api-key
+    processing_mode:
+      request_header_mode: SEND
+      response_header_mode: SEND
+      request_body_mode: NONE
+      response_body_mode: NONE
+- name: envoy.filters.http.ext_proc
+  typed_config:
+    "@type": type.googleapis.com/envoy.extensions.filters.http.ext_proc.v3.ExternalProcessor
+    grpc_service:
+      envoy_grpc:
+        cluster_name: additional_egress_ext_proc
+    observability_mode: true
+    processing_mode:
+      request_header_mode: SEND
+      response_header_mode: SEND
+      request_body_mode: NONE
+      response_body_mode: STREAMED
+`
+
+// writeFiltersFile writes a filters file into a fresh directory.
+func writeFiltersFile(t *testing.T, content string) string {
+	t.Helper()
+	path := t.TempDir() + "/filters.yaml"
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatalf("writing filters file: %v", err)
+	}
+	return path
+}
+
+// A filters file replaces the default filter on both HTTP chains, in order
+// and below the policy ext_proc, and leaves the single cluster in place.
+func TestPatchAtenetEgressManifestWithFiltersFile(t *testing.T) {
+	root, err := config.RepoRoot()
+	if err != nil {
+		t.Fatalf("resolving repo root: %v", err)
+	}
+	env := &Env{Cfg: &config.Config{
+		Root:                               root,
+		AdditionalEgressExtprocService:     "ate-finops/finops:9002",
+		AdditionalEgressExtprocFiltersFile: writeFiltersFile(t, meterAndGateFilters),
+	}}
+
+	patched, err := env.patchAtenetEgressManifest()
+	if err != nil {
+		t.Fatalf("patchAtenetEgressManifest failed: %v", err)
+	}
+	var envoyYaml string
+	for _, doc := range strings.Split(string(patched), "\n---\n") {
+		var obj struct {
+			Kind string            `json:"kind"`
+			Data map[string]string `json:"data"`
+		}
+		if err := yaml.Unmarshal([]byte(doc), &obj); err != nil {
+			t.Fatalf("patched manifest document is not valid YAML: %v", err)
+		}
+		if obj.Kind == "ConfigMap" {
+			envoyYaml = obj.Data["envoy.yaml"]
+			break
+		}
+	}
+	if envoyYaml == "" {
+		t.Fatal("no envoy.yaml found in the patched manifest")
+	}
+	if got := strings.Count(envoyYaml, "- name: "+additionalEgressExtprocCluster); got != 1 {
+		t.Errorf("additional ext_proc cluster defined %d times, want 1", got)
+	}
+
+	spliced := 0
+	for _, filters := range httpFilterChains(t, envoyYaml) {
+		policyAt := -1
+		var additional []map[string]any
+		for i, f := range filters {
+			switch extProcCluster(f) {
+			case "ext_proc_server":
+				policyAt = i
+			case additionalEgressExtprocCluster:
+				if policyAt < 0 {
+					t.Errorf("additional ext_proc at http_filters[%d] runs before the policy ext_proc", i)
+				}
+				additional = append(additional, f)
+			}
+		}
+		if len(additional) == 0 {
+			continue
+		}
+		spliced++
+		if len(additional) != 2 {
+			t.Fatalf("chain carries %d additional ext_proc filters, want the file's 2", len(additional))
+		}
+		gate, _ := additional[0]["typed_config"].(map[string]any)
+		meter, _ := additional[1]["typed_config"].(map[string]any)
+		if gate["max_message_timeout"] != "120s" {
+			t.Errorf("first filter max_message_timeout = %v, want the gate's 120s", gate["max_message_timeout"])
+		}
+		if meter["observability_mode"] != true {
+			t.Errorf("second filter observability_mode = %v, want the meter's true", meter["observability_mode"])
+		}
+	}
+	if spliced != 2 {
+		t.Errorf("filters spliced into %d HTTP chains, want 2", spliced)
+	}
+}
+
+func TestLoadAdditionalEgressExtprocFiltersRejects(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		content string
+		wantIn  string
+	}{
+		{"not a list", "name: envoy.filters.http.ext_proc\n", "want a YAML list"},
+		{"empty list", "[]\n", "the list is empty"},
+		{"another filter", "- name: envoy.filters.http.router\n", `filter 1 is "envoy.filters.http.router"`},
+		{
+			"another type",
+			"- name: envoy.filters.http.ext_proc\n  typed_config:\n    \"@type\": type.googleapis.com/envoy.extensions.filters.http.ext_authz.v3.ExtAuthz\n",
+			"want " + extProcFilterType,
+		},
+		{
+			"another cluster",
+			strings.Replace(meterAndGateFilters, "cluster_name: additional_egress_ext_proc", "cluster_name: ext_proc_server", 1),
+			`filter 1 dials "ext_proc_server"`,
+		},
+		{
+			"google_grpc",
+			"- name: envoy.filters.http.ext_proc\n  typed_config:\n    \"@type\": " + extProcFilterType + "\n    grpc_service:\n      google_grpc:\n        target_uri: finops.example.com:443\n",
+			`filter 1 dials ""`,
+		},
+		{"duplicate key", meterAndGateFilters + "  name: twice\n", "want a YAML list"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := loadAdditionalEgressExtprocFilters(writeFiltersFile(t, tc.content))
+			if err == nil {
+				t.Fatal("loadAdditionalEgressExtprocFilters() = nil error, want one")
+			}
+			if !strings.Contains(err.Error(), tc.wantIn) {
+				t.Errorf("error %q does not contain %q", err, tc.wantIn)
+			}
+		})
+	}
+
+	if _, err := loadAdditionalEgressExtprocFilters(t.TempDir() + "/missing.yaml"); err == nil {
+		t.Error("loadAdditionalEgressExtprocFilters(missing file) = nil error, want one")
+	}
+}
+
 // httpFilterChains returns the http_filters of every HTTP connection manager
 // in the bootstrap's static listeners.
 func httpFilterChains(t *testing.T, envoyYaml string) [][]map[string]any {
@@ -319,19 +483,6 @@ func httpFilterChains(t *testing.T, envoyYaml string) [][]map[string]any {
 		}
 	}
 	return chains
-}
-
-// extProcCluster returns the cluster an ext_proc filter dials, or "" for any
-// other filter.
-func extProcCluster(filter map[string]any) string {
-	if filter["name"] != "envoy.filters.http.ext_proc" {
-		return ""
-	}
-	typedConfig, _ := filter["typed_config"].(map[string]any)
-	grpcService, _ := typedConfig["grpc_service"].(map[string]any)
-	envoyGRPC, _ := grpcService["envoy_grpc"].(map[string]any)
-	name, _ := envoyGRPC["cluster_name"].(string)
-	return name
 }
 
 // The plain GKE install renders the base kustomization, not the raw
