@@ -325,6 +325,51 @@ const meterAndGateFilters = `- name: envoy.filters.http.ext_proc
       response_body_mode: STREAMED
 `
 
+// hostMatcher is a match_delegate matcher that skips the wrapped filter for
+// every host other than one LLM provider.
+var hostMatcher = map[string]any{"matcher_list": map[string]any{"matchers": []any{map[string]any{
+	"predicate": map[string]any{"not_matcher": map[string]any{"single_predicate": map[string]any{
+		"input": map[string]any{"name": "authority", "typed_config": map[string]any{
+			"@type": "type.googleapis.com/envoy.type.matcher.v3.HttpRequestHeaderMatchInput", "header_name": ":authority"}},
+		"value_match": map[string]any{"safe_regex": map[string]any{"google_re2": map[string]any{}, "regex": `^api\.openai\.com(:[0-9]+)?$`}},
+	}}},
+	"on_match": map[string]any{"action": map[string]any{"name": "skip", "typed_config": map[string]any{
+		"@type": "type.googleapis.com/envoy.extensions.filters.common.matcher.action.v3.SkipFilter"}}},
+}}}}
+
+// wrapInMatchDelegate returns the filters file with each filter wrapped in a
+// match_delegate that has hostMatcher.
+func wrapInMatchDelegate(t *testing.T, content string) string {
+	t.Helper()
+	var filters []map[string]any
+	if err := yaml.UnmarshalStrict([]byte(content), &filters); err != nil {
+		t.Fatal(err)
+	}
+	wrapped := make([]map[string]any, len(filters))
+	for i, f := range filters {
+		wrapped[i] = map[string]any{"name": matchDelegateFilterName, "typed_config": map[string]any{
+			"@type": extensionWithMatcherType, "xds_matcher": hostMatcher, "extension_config": f,
+		}}
+	}
+	out, err := yaml.Marshal(wrapped)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(out)
+}
+
+// extProcTypedConfig returns an ext_proc filter's typed_config, directly or
+// inside a match_delegate.
+func extProcTypedConfig(f map[string]any) map[string]any {
+	if f["name"] == matchDelegateFilterName {
+		if inner, err := matchDelegateExtension(f); err == nil {
+			f = inner
+		}
+	}
+	tc, _ := f["typed_config"].(map[string]any)
+	return tc
+}
+
 // writeFiltersFile writes a filters file into a fresh directory.
 func writeFiltersFile(t *testing.T, content string) string {
 	t.Helper()
@@ -336,8 +381,18 @@ func writeFiltersFile(t *testing.T, content string) string {
 }
 
 // A filters file replaces the default filter on both HTTP chains, in order
-// and below the policy ext_proc, and leaves the single cluster in place.
+// and below the policy ext_proc, and leaves the single cluster in place. The
+// filters may sit in match_delegates.
 func TestPatchAtenetEgressManifestWithFiltersFile(t *testing.T) {
+	for _, tc := range []struct{ name, content string }{
+		{"ext_proc", meterAndGateFilters},
+		{"match_delegate", wrapInMatchDelegate(t, meterAndGateFilters)},
+	} {
+		t.Run(tc.name, func(t *testing.T) { testPatchWithFiltersFile(t, tc.content) })
+	}
+}
+
+func testPatchWithFiltersFile(t *testing.T, content string) {
 	root, err := config.RepoRoot()
 	if err != nil {
 		t.Fatalf("resolving repo root: %v", err)
@@ -345,7 +400,7 @@ func TestPatchAtenetEgressManifestWithFiltersFile(t *testing.T) {
 	env := &Env{Cfg: &config.Config{
 		Root:                               root,
 		AdditionalEgressExtprocService:     "ate-finops/finops:9002",
-		AdditionalEgressExtprocFiltersFile: writeFiltersFile(t, meterAndGateFilters),
+		AdditionalEgressExtprocFiltersFile: writeFiltersFile(t, content),
 	}}
 
 	patched, err := env.patchAtenetEgressManifest()
@@ -395,8 +450,7 @@ func TestPatchAtenetEgressManifestWithFiltersFile(t *testing.T) {
 		if len(additional) != 2 {
 			t.Fatalf("chain carries %d additional ext_proc filters, want the file's 2", len(additional))
 		}
-		gate, _ := additional[0]["typed_config"].(map[string]any)
-		meter, _ := additional[1]["typed_config"].(map[string]any)
+		gate, meter := extProcTypedConfig(additional[0]), extProcTypedConfig(additional[1])
 		if gate["max_message_timeout"] != "120s" {
 			t.Errorf("first filter max_message_timeout = %v, want the gate's 120s", gate["max_message_timeout"])
 		}
@@ -434,6 +488,41 @@ func TestLoadAdditionalEgressExtprocFiltersRejects(t *testing.T) {
 			`filter 1 dials ""`,
 		},
 		{"duplicate key", meterAndGateFilters + "  name: twice\n", "want a YAML list"},
+		{
+			"match_delegate of another type",
+			strings.Replace(wrapInMatchDelegate(t, meterAndGateFilters), extensionWithMatcherType, "type.googleapis.com/envoy.extensions.filters.http.composite.v3.Composite", 1),
+			"want " + extensionWithMatcherType,
+		},
+		{
+			"match_delegate without extension_config",
+			"- name: envoy.filters.http.match_delegate\n  typed_config:\n    \"@type\": " + extensionWithMatcherType + "\n    xds_matcher: {}\n",
+			"has no extension_config",
+		},
+		{
+			"match_delegate without matcher",
+			"- name: envoy.filters.http.match_delegate\n  typed_config:\n    \"@type\": " + extensionWithMatcherType + "\n    extension_config:\n      name: envoy.filters.http.ext_proc\n",
+			"has no xds_matcher",
+		},
+		{
+			"match_delegate with another field",
+			strings.Replace(wrapInMatchDelegate(t, meterAndGateFilters), "xds_matcher:", "matcher: {}\n    xds_matcher:", 1),
+			`typed_config field "matcher"`,
+		},
+		{
+			"match_delegate around another filter",
+			strings.Replace(wrapInMatchDelegate(t, meterAndGateFilters), "name: envoy.filters.http.ext_proc", "name: envoy.filters.http.ext_authz", 1),
+			`filter 1 is "envoy.filters.http.ext_authz"`,
+		},
+		{
+			"match_delegate around another cluster",
+			strings.Replace(wrapInMatchDelegate(t, meterAndGateFilters), "cluster_name: additional_egress_ext_proc", "cluster_name: ext_proc_server", 1),
+			`filter 1 dials "ext_proc_server"`,
+		},
+		{
+			"match_delegate in a match_delegate",
+			wrapInMatchDelegate(t, wrapInMatchDelegate(t, meterAndGateFilters)),
+			`filter 1 is "envoy.filters.http.match_delegate"`,
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			_, err := loadAdditionalEgressExtprocFilters(writeFiltersFile(t, tc.content))

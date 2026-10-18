@@ -78,7 +78,8 @@ By default its filter sends the processor request headers only and waits 2s for 
 `--experimental-additional-egress-extproc-filters-file` replaces that filter with ext_proc
 filters you list, for example one that may hold a request on its headers and one that
 streams response bodies in observability mode; each must dial the `additional_egress_ext_proc`
-cluster.
+cluster. A filter may sit in an `envoy.filters.http.match_delegate`, whose matcher skips it
+for requests the processor does not need, such as every host other than the LLM providers.
 
 ## Components
 

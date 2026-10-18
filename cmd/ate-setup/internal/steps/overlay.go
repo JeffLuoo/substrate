@@ -419,6 +419,15 @@ const additionalEgressExtprocCluster = "additional_egress_ext_proc"
 // extProcFilterType is the typed_config of an ext_proc HTTP filter.
 const extProcFilterType = "type.googleapis.com/envoy.extensions.filters.http.ext_proc.v3.ExternalProcessor"
 
+const (
+	extProcFilterName = "envoy.filters.http.ext_proc"
+	// matchDelegateFilterName wraps one HTTP filter with a matcher that can
+	// skip it per request.
+	matchDelegateFilterName = "envoy.filters.http.match_delegate"
+	// extensionWithMatcherType is the typed_config of a match_delegate.
+	extensionWithMatcherType = "type.googleapis.com/envoy.extensions.common.matching.v3.ExtensionWithMatcher"
+)
+
 // loadAdditionalEgressExtprocFilters reads the filters an operator splices in
 // place of emitAdditionalEgressExtprocFilter: for example a synchronous filter
 // that may hold a request on its headers, followed by an observability-mode
@@ -426,9 +435,12 @@ const extProcFilterType = "type.googleapis.com/envoy.extensions.filters.http.ext
 // filter markers.
 //
 // Each filter must be an ext_proc filter that dials the
-// additional_egress_ext_proc cluster. The file configures what the additional
-// processor sees and how long Envoy waits for it; it cannot add other filters
-// to the egress chains or point them at another cluster.
+// additional_egress_ext_proc cluster, or a match_delegate that wraps exactly
+// one such filter, so that its matcher can skip the processor for requests it
+// does not need (for example every host other than the LLM providers). The
+// file configures what the additional processor sees and how long Envoy waits
+// for it; it cannot add other filters to the egress chains or point them at
+// another cluster.
 func loadAdditionalEgressExtprocFilters(path string) (string, error) {
 	raw, err := os.ReadFile(path)
 	if err != nil {
@@ -442,8 +454,15 @@ func loadAdditionalEgressExtprocFilters(path string) (string, error) {
 		return "", fmt.Errorf("additional ext_proc filters in %s: the list is empty", path)
 	}
 	for i, f := range filters {
-		if name, _ := f["name"].(string); name != "envoy.filters.http.ext_proc" {
-			return "", fmt.Errorf("additional ext_proc filters in %s: filter %d is %q, want envoy.filters.http.ext_proc", path, i+1, name)
+		if name, _ := f["name"].(string); name == matchDelegateFilterName {
+			inner, err := matchDelegateExtension(f)
+			if err != nil {
+				return "", fmt.Errorf("additional ext_proc filters in %s: filter %d: %w", path, i+1, err)
+			}
+			f = inner
+		}
+		if name, _ := f["name"].(string); name != extProcFilterName {
+			return "", fmt.Errorf("additional ext_proc filters in %s: filter %d is %q, want %s or a %s that wraps one", path, i+1, name, extProcFilterName, matchDelegateFilterName)
 		}
 		typedConfig, _ := f["typed_config"].(map[string]any)
 		if got, _ := typedConfig["@type"].(string); got != extProcFilterType {
@@ -461,10 +480,43 @@ func loadAdditionalEgressExtprocFilters(path string) (string, error) {
 	return strings.TrimRight(string(out), "\n"), nil
 }
 
-// extProcCluster returns the cluster an ext_proc filter dials, or "" for any
-// other filter.
+// matchDelegateExtension returns the one filter a match_delegate wraps. Its
+// typed_config may hold only the wrapped filter (extension_config) and the
+// matcher (xds_matcher); Envoy lets that matcher do nothing but skip the
+// wrapped filter.
+func matchDelegateExtension(filter map[string]any) (map[string]any, error) {
+	typedConfig, _ := filter["typed_config"].(map[string]any)
+	if got, _ := typedConfig["@type"].(string); got != extensionWithMatcherType {
+		return nil, fmt.Errorf("%s has typed_config @type %q, want %s", matchDelegateFilterName, got, extensionWithMatcherType)
+	}
+	for key := range typedConfig {
+		switch key {
+		case "@type", "extension_config", "xds_matcher":
+		default:
+			return nil, fmt.Errorf("%s has typed_config field %q; only extension_config and xds_matcher are allowed", matchDelegateFilterName, key)
+		}
+	}
+	if _, ok := typedConfig["xds_matcher"].(map[string]any); !ok {
+		return nil, fmt.Errorf("%s has no xds_matcher", matchDelegateFilterName)
+	}
+	inner, ok := typedConfig["extension_config"].(map[string]any)
+	if !ok {
+		return nil, fmt.Errorf("%s has no extension_config", matchDelegateFilterName)
+	}
+	return inner, nil
+}
+
+// extProcCluster returns the cluster an ext_proc filter dials, directly or
+// inside a match_delegate, or "" for any other filter.
 func extProcCluster(filter map[string]any) string {
-	if filter["name"] != "envoy.filters.http.ext_proc" {
+	if filter["name"] == matchDelegateFilterName {
+		inner, err := matchDelegateExtension(filter)
+		if err != nil {
+			return ""
+		}
+		filter = inner
+	}
+	if filter["name"] != extProcFilterName {
 		return ""
 	}
 	typedConfig, _ := filter["typed_config"].(map[string]any)
