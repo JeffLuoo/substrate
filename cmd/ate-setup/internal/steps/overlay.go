@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -416,6 +417,11 @@ func (e *Env) patchAtenetEgressManifest() ([]byte, error) {
 
 const additionalEgressExtprocCluster = "additional_egress_ext_proc"
 
+// actorIdentityAttribute is the request attribute that names the actor. Every
+// additional ext_proc filter must request it, so that the processor never
+// has to identify the actor from headers that the sandbox can set.
+const actorIdentityAttribute = "filter_state['dev.ate.actor.identity']"
+
 // extProcFilterType is the typed_config of an ext_proc HTTP filter.
 const extProcFilterType = "type.googleapis.com/envoy.extensions.filters.http.ext_proc.v3.ExternalProcessor"
 
@@ -435,12 +441,14 @@ const (
 // filter markers.
 //
 // Each filter must be an ext_proc filter that dials the
-// additional_egress_ext_proc cluster, or a match_delegate that wraps exactly
-// one such filter, so that its matcher can skip the processor for requests it
-// does not need (for example every host other than the LLM providers). The
-// file configures what the additional processor sees and how long Envoy waits
-// for it; it cannot add other filters to the egress chains or point them at
-// another cluster.
+// additional_egress_ext_proc cluster and requests the actor identity
+// attribute, or a match_delegate that wraps exactly one such filter. A filter
+// that is not in observability mode must also set
+// mutation_rules.disallow_system: true. A match_delegate lets its matcher
+// skip the processor for requests it does not need (for example every host
+// other than the LLM providers). The file configures what the additional
+// processor sees and how long Envoy waits for it; it cannot add other filters
+// to the egress chains or point them at another cluster.
 func loadAdditionalEgressExtprocFilters(path string) (string, error) {
 	raw, err := os.ReadFile(path)
 	if err != nil {
@@ -472,12 +480,36 @@ func loadAdditionalEgressExtprocFilters(path string) (string, error) {
 			return "", fmt.Errorf("additional ext_proc filters in %s: filter %d dials %q, want grpc_service.envoy_grpc.cluster_name %s",
 				path, i+1, got, additionalEgressExtprocCluster)
 		}
+		if !slices.Contains(stringList(typedConfig["request_attributes"]), actorIdentityAttribute) {
+			return "", fmt.Errorf("additional ext_proc filters in %s: filter %d does not request the attribute %s",
+				path, i+1, actorIdentityAttribute)
+		}
+		// Envoy applies no mutation from a filter in observability mode. Any
+		// other filter must not change system headers such as :authority,
+		// which select the upstream and the credential that is injected.
+		mutationRules, _ := typedConfig["mutation_rules"].(map[string]any)
+		if typedConfig["observability_mode"] != true && mutationRules["disallow_system"] != true {
+			return "", fmt.Errorf("additional ext_proc filters in %s: filter %d can mutate requests but does not set mutation_rules.disallow_system: true",
+				path, i+1)
+		}
 	}
 	out, err := yaml.Marshal(filters)
 	if err != nil {
 		return "", fmt.Errorf("additional ext_proc filters in %s: %w", path, err)
 	}
 	return strings.TrimRight(string(out), "\n"), nil
+}
+
+// stringList returns the strings of a YAML list, or nil.
+func stringList(v any) []string {
+	items, _ := v.([]any)
+	var out []string
+	for _, item := range items {
+		if s, ok := item.(string); ok {
+			out = append(out, s)
+		}
+	}
+	return out
 }
 
 // matchDelegateExtension returns the one filter a match_delegate wraps. Its

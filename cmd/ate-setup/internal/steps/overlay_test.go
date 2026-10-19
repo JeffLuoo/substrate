@@ -289,7 +289,9 @@ func TestPatchAtenetEgressManifest(t *testing.T) {
 
 // meterAndGateFilters is a filters file in the shape the option is for: a
 // gate that can extend Envoy's wait while it holds a request, then a meter
-// that streams response bodies without delaying them.
+// that streams response bodies without delaying them. Both receive the actor
+// identity. The gate can mutate, so it disallows system headers; the meter
+// is in observability mode, so Envoy applies none of its mutations.
 const meterAndGateFilters = `- name: envoy.filters.http.ext_proc
   typed_config:
     "@type": type.googleapis.com/envoy.extensions.filters.http.ext_proc.v3.ExternalProcessor
@@ -311,6 +313,8 @@ const meterAndGateFilters = `- name: envoy.filters.http.ext_proc
       response_header_mode: SEND
       request_body_mode: NONE
       response_body_mode: NONE
+    mutation_rules:
+      disallow_system: true
 - name: envoy.filters.http.ext_proc
   typed_config:
     "@type": type.googleapis.com/envoy.extensions.filters.http.ext_proc.v3.ExternalProcessor
@@ -318,6 +322,8 @@ const meterAndGateFilters = `- name: envoy.filters.http.ext_proc
       envoy_grpc:
         cluster_name: additional_egress_ext_proc
     observability_mode: true
+    request_attributes:
+    - filter_state['dev.ate.actor.identity']
     processing_mode:
       request_header_mode: SEND
       response_header_mode: SEND
@@ -517,6 +523,36 @@ func TestLoadAdditionalEgressExtprocFiltersRejects(t *testing.T) {
 			"match_delegate around another cluster",
 			strings.Replace(wrapInMatchDelegate(t, meterAndGateFilters), "cluster_name: additional_egress_ext_proc", "cluster_name: ext_proc_server", 1),
 			`filter 1 dials "ext_proc_server"`,
+		},
+		{
+			"gate without mutation_rules",
+			strings.Replace(meterAndGateFilters, "    mutation_rules:\n      disallow_system: true\n", "", 1),
+			"filter 1 can mutate requests but does not set mutation_rules.disallow_system: true",
+		},
+		{
+			"gate with disallow_system false",
+			strings.Replace(meterAndGateFilters, "disallow_system: true", "disallow_system: false", 1),
+			"filter 1 can mutate requests but does not set mutation_rules.disallow_system: true",
+		},
+		{
+			"observability_mode false without mutation_rules",
+			strings.Replace(meterAndGateFilters, "observability_mode: true", "observability_mode: false", 1),
+			"filter 2 can mutate requests but does not set mutation_rules.disallow_system: true",
+		},
+		{
+			"gate without the identity attribute",
+			strings.Replace(meterAndGateFilters, "    request_attributes:\n    - filter_state['dev.ate.actor.identity']\n", "", 1),
+			"filter 1 does not request the attribute filter_state['dev.ate.actor.identity']",
+		},
+		{
+			"meter with other attributes only",
+			strings.Replace(meterAndGateFilters, "    observability_mode: true\n    request_attributes:\n    - filter_state['dev.ate.actor.identity']\n", "    observability_mode: true\n    request_attributes:\n    - request.host\n", 1),
+			"filter 2 does not request the attribute filter_state['dev.ate.actor.identity']",
+		},
+		{
+			"match_delegate around a gate without mutation_rules",
+			wrapInMatchDelegate(t, strings.Replace(meterAndGateFilters, "    mutation_rules:\n      disallow_system: true\n", "", 1)),
+			"filter 1 can mutate requests",
 		},
 		{
 			"match_delegate in a match_delegate",
