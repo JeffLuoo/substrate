@@ -72,10 +72,12 @@ ActorTemplate, worker pool, test, and manual walkthrough are otherwise the same.
 | Configuration | Envoy bootstrap in `atenet-egress.yaml` | Static agentgateway ConfigMap overlay |
 | Access log | Text beginning with `[egress]`, including actor SAN | Structured log including `substrate.connect.authority` |
 
-The experimental additional egress `ext_proc` service currently requires Envoy; the installer
-rejects that option with agentgateway rather than silently omitting it.
-By default its filter sends the processor request headers only and waits 2s for each reply.
-`--experimental-additional-egress-extproc-filters-file` replaces that filter with ext_proc
+The experimental additional egress `ext_proc` service (`--experimental-additional-egress-extproc-service`)
+is supported on both Envoy and agentgateway. By default it sends the processor request headers only
+and fails closed; on Envoy it passes `dev.ate.actor.identity`, `dev.ate.actor.uid`, and
+`dev.ate.actor.template` from filter state, and on agentgateway it passes `source.spiffeId` and
+`source.certificate` (whose `ActorIdentity` X.509 extension carries the verified actor UID).
+`--experimental-additional-egress-extproc-filters-file` requires Envoy and replaces that filter with ext_proc
 filters you list, for example one that may hold a request on its headers and one that
 streams response bodies in observability mode; each must dial the `additional_egress_ext_proc`
 cluster. A filter may sit in an `envoy.filters.http.match_delegate`, whose matcher skips it

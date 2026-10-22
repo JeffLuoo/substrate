@@ -188,17 +188,15 @@ func (e *Env) renderAtenetEgressManifest(ctx context.Context, provider config.Cr
 	general := e.Cfg.AdditionalEgressExtprocService != ""
 
 	if e.Cfg.Router == config.RouterAgentgateway {
-		// Rejected during configuration loading, which names the channel the
-		// value came from. This guards the invariant for a caller that built
-		// a Config directly; an operator never sees it.
-		if general {
-			return nil, fmt.Errorf("internal: additional ext_proc filter reached rendering with dataplane %s", config.RouterAgentgateway)
-		}
 		raw, err := e.render(e.Cfg.Path(installDir + "/agentgateway-egress"))
 		if err != nil {
 			return nil, err
 		}
 		raw, err = patchAgentgatewayEgressInject(raw, provider)
+		if err != nil {
+			return nil, err
+		}
+		raw, err = patchAgentgatewayEgressExtproc(raw, e.Cfg.AdditionalEgressExtprocService)
 		if err != nil {
 			return nil, err
 		}
@@ -318,7 +316,54 @@ func patchAgentgatewayEgressInject(raw []byte, provider config.CredentialProvide
 	return replaceManifestMarker(raw, "#ATE_AGENTGATEWAY_CREDENTIAL_PROVIDERS", block)
 }
 
+// patchAgentgatewayEgressExtproc splices an extProc policy onto the HTTP and
+// HTTPS egress routes when an additional ext_proc service is configured,
+// forwarding both source.spiffeId and source.certificate so the processor can
+// verify the actor's UID from the ActorIdentity X.509 extension.
+func patchAgentgatewayEgressExtproc(raw []byte, serviceSpec string) ([]byte, error) {
+	var block string
+	if serviceSpec != "" {
+		parts := strings.Split(serviceSpec, "/")
+		if len(parts) != 2 {
+			return nil, fmt.Errorf("invalid additional ext_proc service %q: expected <namespace>/<service>:<port>", serviceSpec)
+		}
+		namespace := parts[0]
+		svcPort := strings.Split(parts[1], ":")
+		if len(svcPort) != 2 {
+			return nil, fmt.Errorf("invalid additional ext_proc service %q: expected <namespace>/<service>:<port>", serviceSpec)
+		}
+		service := svcPort[0]
+		port := svcPort[1]
+		address := fmt.Sprintf("%s.%s.svc.cluster.local:%s", service, namespace, port)
+		serverName := fmt.Sprintf("%s.%s.svc", service, namespace)
+		block = fmt.Sprintf(`extProc:
+  host: %q
+  policies:
+    backendTLS:
+      hostname: %q
+      cert: /run/podidentity.podcert.ate.dev/credential-bundle.pem
+      key: /run/podidentity.podcert.ate.dev/credential-bundle.pem
+      root: /run/servicedns-ca/trust-bundle.pem
+  failureMode: failClosed
+  processingOptions:
+    requestHeaderMode: send
+    responseHeaderMode: skip
+    requestBodyMode: none
+    responseBodyMode: none
+    requestTrailerMode: skip
+    responseTrailerMode: skip
+  requestAttributes:
+    source.spiffeId: source.spiffeId
+    source.certificate: source.certificate`, address, serverName)
+	}
+	return replaceManifestMarkers(raw, "#ATE_AGENTGATEWAY_EXTPROC", block, 2)
+}
+
 func replaceManifestMarker(raw []byte, marker, block string) ([]byte, error) {
+	return replaceManifestMarkers(raw, marker, block, 1)
+}
+
+func replaceManifestMarkers(raw []byte, marker, block string, want int) ([]byte, error) {
 	var out []string
 	replaced := 0
 	for _, line := range strings.Split(string(raw), "\n") {
@@ -334,8 +379,8 @@ func replaceManifestMarker(raw []byte, marker, block string) ([]byte, error) {
 		}
 		out = append(out, line)
 	}
-	if replaced != 1 {
-		return nil, fmt.Errorf("expected 1 %s marker, found %d", marker, replaced)
+	if replaced != want {
+		return nil, fmt.Errorf("expected %d %s marker, found %d", want, marker, replaced)
 	}
 	return []byte(strings.Join(out, "\n")), nil
 }

@@ -202,3 +202,13 @@ const (
 // RequestedServerNameAttribute is the SNI of the connection a request arrived
 // on. The handler logs it next to the Host it authorized.
 const RequestedServerNameAttribute = "connection.requested_server_name"
+
+// AgentgatewayClientSPIFFEIDAttribute and AgentgatewayClientCertificateAttribute
+// are agentgateway's CEL variables for the downstream mTLS peer's URI SAN and
+// PEM leaf certificate (which carries the ActorIdentity X.509 extension with
+// the verified actor UID). Like FilterChainNameAttribute, they stay in the
+// proxy's own namespace rather than under "dev.ate.".
+const (
+	AgentgatewayClientSPIFFEIDAttribute    = "source.spiffeId"
+	AgentgatewayClientCertificateAttribute = "source.certificate"
+)

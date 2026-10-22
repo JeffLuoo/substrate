@@ -1318,6 +1318,106 @@ func TestPatchAgentgatewayCredentialProviderRequiresOneMarker(t *testing.T) {
 	}
 }
 
+func TestRenderAgentgatewayAdditionalExtprocService(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		service string
+	}{
+		{name: "disabled"},
+		{name: "enabled", service: "ate-finops/finops:9002"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			src := images.Source{Repo: "example.com/substrate", Tag: "v1.2.3"}
+			e := &Env{
+				Cfg: &config.Config{
+					Root:                           repoRoot(t),
+					Router:                         config.RouterAgentgateway,
+					Images:                         src,
+					AdditionalEgressExtprocService: tc.service,
+				},
+				resolver: images.NewPrebuilt(src, func(context.Context, string) (string, error) {
+					return "sha256:" + strings.Repeat("2", 64), nil
+				}),
+			}
+			built, err := e.renderAtenetEgressManifest(t.Context(), config.CredentialProvider{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if strings.Contains(string(built), "#ATE_AGENTGATEWAY_EXTPROC") {
+				t.Fatal("unresolved agentgateway extproc marker")
+			}
+			found := false
+			for _, doc := range strings.Split(string(built), "\n---\n") {
+				var cm corev1.ConfigMap
+				if err := yaml.Unmarshal([]byte(doc), &cm); err != nil || cm.Name != "atenet-egress-agentgateway-substrate-config" {
+					continue
+				}
+				found = true
+				resolved, err := yaml.YAMLToJSON([]byte(cm.Data["config.yaml"]))
+				if err != nil {
+					t.Fatal(err)
+				}
+				gateway, err := kyaml.Parse(string(resolved))
+				if err != nil {
+					t.Fatal(err)
+				}
+				for _, protocol := range []string{"HTTP", "HTTPS"} {
+					routes, err := gateway.Pipe(kyaml.Lookup("binds", "[mode=internal]", "listeners", "[protocol="+protocol+"]", "routes"))
+					if err != nil || routes == nil {
+						t.Fatalf("%s routes missing: %v", protocol, err)
+					}
+					var extProcNode *kyaml.RNode
+					for _, route := range routes.YNode().Content {
+						candidate, err := kyaml.NewRNode(route).Pipe(kyaml.Lookup("policies", "extProc"))
+						if err == nil && candidate != nil {
+							extProcNode = candidate
+							break
+						}
+					}
+					if tc.service == "" {
+						if extProcNode != nil {
+							t.Errorf("%s unexpectedly has extProc policy", protocol)
+						}
+						continue
+					}
+					if extProcNode == nil {
+						t.Fatalf("%s extProc policy missing", protocol)
+					}
+					var got map[string]any
+					if err := extProcNode.YNode().Decode(&got); err != nil {
+						t.Fatal(err)
+					}
+					if got["host"] != "finops.ate-finops.svc.cluster.local:9002" {
+						t.Errorf("%s extProc host = %v, want finops.ate-finops.svc.cluster.local:9002", protocol, got["host"])
+					}
+					if got["failureMode"] != "failClosed" {
+						t.Errorf("%s extProc failureMode = %v, want failClosed", protocol, got["failureMode"])
+					}
+					reqAttrs, _ := got["requestAttributes"].(map[string]any)
+					wantAttrs := map[string]any{
+						"source.spiffeId":    "source.spiffeId",
+						"source.certificate": "source.certificate",
+					}
+					if !reflect.DeepEqual(reqAttrs, wantAttrs) {
+						t.Errorf("%s extProc requestAttributes = %v, want %v", protocol, reqAttrs, wantAttrs)
+					}
+				}
+			}
+			if !found {
+				t.Fatal("agentgateway egress ConfigMap is missing")
+			}
+		})
+	}
+}
+
+func TestPatchAgentgatewayExtprocRequiresTwoMarkers(t *testing.T) {
+	for _, raw := range []string{"", "#ATE_AGENTGATEWAY_EXTPROC\n", "#ATE_AGENTGATEWAY_EXTPROC\n#ATE_AGENTGATEWAY_EXTPROC\n#ATE_AGENTGATEWAY_EXTPROC\n"} {
+		if _, err := patchAgentgatewayEgressExtproc([]byte(raw), "ate-finops/finops:9002"); err == nil {
+			t.Errorf("accepted a manifest without exactly two markers: %q", raw)
+		}
+	}
+}
+
 // otelConfig seeds the ConfigMap every component reads its collector address
 // from.
 func otelConfig(endpoint string) *corev1.ConfigMap {

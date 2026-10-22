@@ -122,6 +122,7 @@ patches:
                         cert: /run/podidentity.podcert.ate.dev/credential-bundle.pem
                         key: /run/podidentity.podcert.ate.dev/credential-bundle.pem
                         root: /run/servicedns-ca/trust-bundle.pem
+                  #ATE_AGENTGATEWAY_EXTPROC
             - protocol: HTTP
               routes:
               - name: reject-websocket-upgrade
@@ -142,6 +143,7 @@ patches:
                     target: source.connectHeaders["host"]
                 policies:
                   substrateEgress: *egressPolicy
+                  #ATE_AGENTGATEWAY_EXTPROC
             - protocol: TLS
               tcpRoutes:
               - backends:

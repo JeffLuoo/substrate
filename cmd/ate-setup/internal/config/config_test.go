@@ -917,7 +917,7 @@ func TestLoadRejectsInvalidValues(t *testing.T) {
 		{"podcert workers", Options{PodcertWorkersPerSigner: -1}},
 		{"cluster size", Options{ClusterSize: "size5"}},
 		{"extproc invalid format", Options{AdditionalEgressExtprocService: "extproc:50051"}},
-		{"extproc agentgateway", Options{Router: RouterAgentgateway, AdditionalEgressExtprocService: "ate-system/extproc:50051"}},
+		{"extproc filters agentgateway", Options{Router: RouterAgentgateway, AdditionalEgressExtprocService: "ate-system/extproc:50051", AdditionalEgressExtprocFiltersFile: "filters.yaml"}},
 		{"extproc filters without a service", Options{AdditionalEgressExtprocFiltersFile: "filters.yaml"}},
 		{"provider not JSON", Options{CredentialProvider: "k8s.io"}},
 		{"provider as a JSON string", Options{CredentialProvider: `"off"`}},

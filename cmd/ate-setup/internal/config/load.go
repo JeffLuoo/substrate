@@ -439,16 +439,18 @@ func validateResolved(cfg *Config, r *Resolved) error {
 		if err := validateExtprocService(extproc); err != nil {
 			return err
 		}
-		if cfg.Router != RouterEnvoy {
-			return &ConflictError{A: extproc, B: dataplane,
-				Why: "an additional ext_proc filter requires dataplane " + RouterEnvoy}
-		}
 	}
-	if cfg.AdditionalEgressExtprocFiltersFile != "" && cfg.AdditionalEgressExtprocService == "" {
+	if cfg.AdditionalEgressExtprocFiltersFile != "" {
 		filters, _ := r.Value("atenet.egress.additionalExtprocFiltersFile")
-		extproc, _ := r.Value("atenet.egress.additionalExtprocService")
-		return &ConflictError{A: filters, B: extproc,
-			Why: "the filters dial the additional_egress_ext_proc cluster, which only an additional ext_proc service defines"}
+		if cfg.AdditionalEgressExtprocService == "" {
+			extproc, _ := r.Value("atenet.egress.additionalExtprocService")
+			return &ConflictError{A: filters, B: extproc,
+				Why: "the filters dial the additional_egress_ext_proc cluster, which only an additional ext_proc service defines"}
+		}
+		if cfg.Router != RouterEnvoy {
+			return &ConflictError{A: filters, B: dataplane,
+				Why: "an additional ext_proc filters file requires dataplane " + RouterEnvoy}
+		}
 	}
 	// A gate the components do not know makes each of them refuse to start, so
 	// catch it here rather than as a failed rollout.

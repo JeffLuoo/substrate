@@ -51,9 +51,6 @@ import (
 )
 
 const (
-	// agentgatewayClientCertificateAttribute is the PEM peer certificate agentgateway
-	// computes from the downstream TLS connection for ext_proc.
-	agentgatewayClientCertificateAttribute = "source.certificate"
 	// forwardedClientCertHeader is the header Envoy fills in with details of
 	// the mTLS peer, including the PEM chain it validated. The egress filter
 	// chain sets forward_client_cert_details: SANITIZE_SET, so whatever a
@@ -309,7 +306,7 @@ func (h *Handler) validateActor(ctx context.Context, actorRef resources.ActorRef
 // on the request into a verified ActorRef and optional ActorIdentity UID, or
 // an error describing why it cannot be trusted.
 func (h *Handler) authenticateActorCertificate(md *extproc.RequestMetadata) (resources.ActorRef, string, error) {
-	if certificate := md.Attribute(agentgatewayClientCertificateAttribute); certificate != "" {
+	if certificate := md.Attribute(extproc.AgentgatewayClientCertificateAttribute); certificate != "" {
 		chain, err := parseCertificateChainPEM([]byte(certificate))
 		if err != nil {
 			return resources.ActorRef{}, "", err

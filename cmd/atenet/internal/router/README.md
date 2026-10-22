@@ -142,6 +142,8 @@ a request are declared once, in `extproc/attributes.go`.
 | `dev.ate.actor.template` | egress | carries the actor's template name (best-effort, from the CONNECT leg's `ateapi` lookup) to the logs and additional ext_proc services |
 | `dev.ate.egress:dial` | egress | dynamic metadata: a request leg's answer, `name` or `address`, which picks the route |
 | `dev.ate.extproc.direction` | egress | selects the egress handler for dataplanes without Envoy filter chains |
+| `source.spiffeId` | egress | agentgateway CEL variable carrying the verified peer certificate's SPIFFE URI SAN across `dynamicCa` re-entry to additional `ext_proc` services |
+| `source.certificate` | egress | agentgateway CEL variable carrying the verified PEM leaf certificate (including the `ActorIdentity` X.509 extension with the actor UID) across `dynamicCa` re-entry to additional `ext_proc` services |
 
 ### name it
 

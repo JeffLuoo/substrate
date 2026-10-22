@@ -310,7 +310,7 @@ func agentgatewayEgressMetadata(certificate string) *extproc.RequestMetadata {
 	}, map[string]*structpb.Struct{
 		"envoy.filters.http.ext_proc": {
 			Fields: map[string]*structpb.Value{
-				agentgatewayClientCertificateAttribute: structpb.NewStringValue(certificate),
+				extproc.AgentgatewayClientCertificateAttribute: structpb.NewStringValue(certificate),
 			},
 		},
 	})
@@ -886,6 +886,26 @@ func TestHandleConnectEmitsActorUIDAndTemplateMetadataAndVerifiesCertExtension(t
 		h := egressHandler(ca.roots(), runningActor(), nil)
 
 		_, err := h.HandleRequestHeaders(context.Background(), egressMetadata(xfccHeader(leaf)))
+		wantStatus(t, err, envoy_type.StatusCode_Forbidden)
+	})
+
+	t.Run("agentgateway source.certificate verifies ActorIdentity UID and emits actor_uid", func(t *testing.T) {
+		leaf := ca.issueActorCert(t, spiffeURI, withIdentityExt(testEgressAtespace, testEgressActor, testEgressActorUID))
+		certPEM := string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: leaf.Raw}))
+		h := egressHandler(ca.roots(), runningActor(), nil)
+
+		res, err := h.HandleRequestHeaders(context.Background(), agentgatewayEgressMetadata(certPEM))
+		if err != nil {
+			t.Fatalf("HandleRequestHeaders() error = %v, want nil", err)
+		}
+		ns := res.DynamicMetadata.GetFields()[extproc.EgressMetadataNamespace].GetStructValue().GetFields()
+		if got := ns[extproc.EgressActorUIDKey].GetStringValue(); got != testEgressActorUID {
+			t.Errorf("%s = %q, want %q", extproc.EgressActorUIDKey, got, testEgressActorUID)
+		}
+
+		staleLeaf := ca.issueActorCert(t, spiffeURI, withIdentityExt(testEgressAtespace, testEgressActor, "stale-uid"))
+		stalePEM := string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: staleLeaf.Raw}))
+		_, err = h.HandleRequestHeaders(context.Background(), agentgatewayEgressMetadata(stalePEM))
 		wantStatus(t, err, envoy_type.StatusCode_Forbidden)
 	})
 }
