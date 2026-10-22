@@ -80,8 +80,32 @@ groups:
           docs/metrics/substrate.yaml. A Run or a Restore starts an activation.
           ate.stats.cpu.time restarts at zero with each one. The epoch is the
           StartTimeUnixNano of a cumulative metric point, carried as an
-          attribute because a log record has no field for it.
+          attribute because a log record has no field for it. On a closing
+          lifecycle record, it is the creation timestamp of the worker
+          assignment that the transition released.
         examples: [1699999990000000000]
+      - id: ate.actor.booked.cpu
+        stability: development
+        type: double
+        brief: >
+          The CPU reservation in cores that the actor booked on its worker for
+          the activation being closed.
+        note: >
+          Logs only, on the closing lifecycle record that releases a worker
+          assignment. Taken from the worker assignment's admitted CPU limit, or
+          the ActorTemplate's CPU limit when the assignment carries none.
+        examples: [0.25, 1.0]
+      - id: ate.actor.booked.memory
+        stability: development
+        type: int
+        brief: >
+          The memory reservation in bytes that the actor booked on its worker
+          for the activation being closed.
+        note: >
+          Logs only, on the closing lifecycle record that releases a worker
+          assignment. Taken from the worker assignment's admitted memory limit,
+          or the ActorTemplate's memory limit when the assignment carries none.
+        examples: [536870912]
       - id: ate.actor.state
         stability: development
         brief: The state the actor is in now.

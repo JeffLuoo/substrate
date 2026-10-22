@@ -1104,6 +1104,10 @@ func (f *capturingAtelet) PromoteSnapshot(ctx context.Context, req *ateletpb.Pro
 	return &ateletpb.PromoteSnapshotResponse{}, nil
 }
 
+func (f *capturingAtelet) Terminate(context.Context, *ateletpb.TerminateRequest) (*ateletpb.TerminateResponse, error) {
+	return &ateletpb.TerminateResponse{}, nil
+}
+
 // calls returns how many Checkpoint and PromoteSnapshot RPCs were received.
 func (f *capturingAtelet) calls() (checkpoints, promotes int) {
 	f.mu.Lock()

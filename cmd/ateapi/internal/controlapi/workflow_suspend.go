@@ -142,7 +142,7 @@ func (w *ActorWorkflow) suspendActor(ctx context.Context, actorRef resources.Act
 	// them here, as crash.go does for the crash counter.
 	finalAttrs = lifecycleOpAttrs(actor, actorTemplate, "", wireFidelity)
 	var finalized *ateapipb.Actor
-	if finalized, err = w.ensureSuspendedFinalized(leaseCtx, actorRef, mode); err != nil {
+	if finalized, err = w.ensureSuspendedFinalized(leaseCtx, actorRef, actorTemplate, mode); err != nil {
 		return nil, err
 	}
 	actor = finalized
@@ -468,7 +468,7 @@ func (w *ActorWorkflow) ensureVolumesDetached(ctx context.Context, actor *ateapi
 // crashing the actor after its worker died) is not overwritten: an actor that
 // is no longer SUSPENDING is left as it is and the step fails with
 // FailedPrecondition.
-func (w *ActorWorkflow) ensureSuspendedFinalized(ctx context.Context, actorRef resources.ActorRef, mode suspendMode) (_ *ateapipb.Actor, err error) {
+func (w *ActorWorkflow) ensureSuspendedFinalized(ctx context.Context, actorRef resources.ActorRef, actorTemplate *ateapipb.ActorTemplate, mode suspendMode) (_ *ateapipb.Actor, err error) {
 	ctx, done := stepSpan(ctx, "FinalizeSuspended")
 	defer func() { err = done(err) }()
 
@@ -513,14 +513,17 @@ func (w *ActorWorkflow) ensureSuspendedFinalized(ctx context.Context, actorRef r
 	}
 
 	// 1. Free the worker (if it hasn't been freed yet)
-	if latestActor.GetStatus().GetWorkerAssignment() != nil {
+	workerAssignment := latestActor.GetStatus().GetWorkerAssignment()
+	var actorAssignment *ateapipb.ActorAssignment
+	if workerAssignment != nil {
 		t = time.Now()
-		_, _, err := releaseWorker(ctx, w.store, latestActor)
+		_, _, actorAssignment, err = releaseWorker(ctx, w.store, latestActor)
 		dReleaseWorker = time.Since(t)
 		if err != nil {
 			return nil, err
 		}
 	}
+	closeAttrs := activationCloseAttrs(workerAssignment, actorAssignment, actorTemplate)
 
 	// 2. Finalize the actor: record its new snapshot and mark it SUSPENDED. This
 	// must run even with no worker assignment (nothing to free), or the actor
@@ -555,7 +558,7 @@ func (w *ActorWorkflow) ensureSuspendedFinalized(ctx context.Context, actorRef r
 		}
 		return nil, err
 	}
-	logActorStateChanged(ctx, storedActor, ateattr.OperationSuspend)
+	logActorStateChanged(ctx, storedActor, ateattr.OperationSuspend, closeAttrs...)
 
 	// 3. Release the external snapshot this suspend replaced. Best-effort: the
 	// new snapshot is committed and the worker is gone, so failing the

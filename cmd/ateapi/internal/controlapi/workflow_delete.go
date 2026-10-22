@@ -82,8 +82,10 @@ func (w *ActorWorkflow) DeleteActor(ctx context.Context, actorRef resources.Acto
 	}
 
 	// Release worker if atelet termination and volume detachment did not fail.
+	var workerAssignment *ateapipb.WorkerAssignment
+	var actorAssignment *ateapipb.ActorAssignment
 	if atletTerminatedErr == nil && volumesDetachedErr == nil {
-		if actor, err = w.ensureWorkerReleased(ctx, actorRef, actor); err != nil {
+		if actor, workerAssignment, actorAssignment, err = w.ensureWorkerReleased(ctx, actorRef, actor); err != nil {
 			errs = append(errs, fmt.Errorf("while releasing worker: %w", err))
 		}
 	} else {
@@ -104,7 +106,8 @@ func (w *ActorWorkflow) DeleteActor(ctx context.Context, actorRef resources.Acto
 	if len(errs) > 0 {
 		return nil, errors.Join(errs...)
 	}
-	return w.finalizeDeleted(ctx, actor)
+	closeAttrs := activationCloseAttrs(workerAssignment, actorAssignment, actorTemplate)
+	return w.finalizeDeleted(ctx, actor, closeAttrs...)
 }
 
 // loadActorForDelete fetches the current actor record.
@@ -269,7 +272,7 @@ func (w *ActorWorkflow) releaseAssignmentWithoutBacklink(ctx context.Context, ac
 	return nil
 }
 
-func (w *ActorWorkflow) ensureWorkerReleased(ctx context.Context, actorRef resources.ActorRef, actor *ateapipb.Actor) (updated *ateapipb.Actor, err error) {
+func (w *ActorWorkflow) ensureWorkerReleased(ctx context.Context, actorRef resources.ActorRef, actor *ateapipb.Actor) (updated *ateapipb.Actor, workerAssignment *ateapipb.WorkerAssignment, actorAssignment *ateapipb.ActorAssignment, err error) {
 	ctx, done := stepSpan(ctx, "ReleaseWorker")
 	defer func() { err = done(err) }()
 
@@ -280,23 +283,24 @@ func (w *ActorWorkflow) ensureWorkerReleased(ctx context.Context, actorRef resou
 		// what recovers it; skipping would leave its share of the Worker's
 		// capacity booked until the Worker itself went away. The resume path
 		// recovers the same window through workerHoldingStaleClaim.
-		return actor, w.releaseAssignmentWithoutBacklink(ctx, actor)
+		return actor, nil, nil, w.releaseAssignmentWithoutBacklink(ctx, actor)
 	}
 
 	latestActor, err := w.store.GetActor(ctx, actorRef)
 	if err != nil {
-		return nil, err
+		return nil, nil, nil, err
 	}
 
 	if latestActor.GetStatus().GetWorkerAssignment() != nil {
-		_, _, err := releaseWorker(ctx, w.store, latestActor)
+		workerAssignment = latestActor.GetStatus().GetWorkerAssignment()
+		_, _, actorAssignment, err = releaseWorker(ctx, w.store, latestActor)
 		if err != nil {
-			return nil, err
+			return nil, nil, nil, err
 		}
 
 		latestActor, err = w.store.GetActor(ctx, actorRef)
 		if err != nil {
-			return nil, err
+			return nil, nil, nil, err
 		}
 
 		updatedActor, err := w.store.UpdateActor(ctx, actorRef, store.PreconditionFrom(latestActor), func(dbActor *ateapipb.Actor) error {
@@ -309,13 +313,13 @@ func (w *ActorWorkflow) ensureWorkerReleased(ctx context.Context, actorRef resou
 		})
 		if err != nil {
 			if errors.Is(err, store.ErrVersionConflict) {
-				return nil, apierror.Aborted("concurrent update conflict, please retry")
+				return nil, nil, nil, apierror.Aborted("concurrent update conflict, please retry")
 			}
-			return nil, err
+			return nil, nil, nil, err
 		}
 		latestActor = updatedActor
 	}
-	return latestActor, nil
+	return latestActor, workerAssignment, actorAssignment, nil
 }
 
 // ensureMarkedDeleting transitions the actor to DELETING and persists the
@@ -446,7 +450,7 @@ func actorSnapshotStoragePrefix(actor *ateapipb.Actor) (resources.StoragePrefix,
 
 // finalizeDeleted removes the actor from the store and returns the deleted
 // record.
-func (w *ActorWorkflow) finalizeDeleted(ctx context.Context, actor *ateapipb.Actor) (_ *ateapipb.Actor, err error) {
+func (w *ActorWorkflow) finalizeDeleted(ctx context.Context, actor *ateapipb.Actor, closeAttrs ...slog.Attr) (_ *ateapipb.Actor, err error) {
 	ctx, done := stepSpan(ctx, "FinalizeDeleted")
 	defer func() { err = done(err) }()
 
@@ -465,6 +469,6 @@ func (w *ActorWorkflow) finalizeDeleted(ctx context.Context, actor *ateapipb.Act
 		}
 		return nil, fmt.Errorf("while deleting actor from DB: %w", err)
 	}
-	logActorDeleted(ctx, deleted, ateattr.OperationDelete)
+	logActorDeleted(ctx, deleted, ateattr.OperationDelete, closeAttrs...)
 	return deleted, nil
 }

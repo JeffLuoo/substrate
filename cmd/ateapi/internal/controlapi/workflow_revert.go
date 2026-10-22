@@ -90,7 +90,8 @@ func (w *ActorWorkflow) RevertActor(ctx context.Context, actorRef resources.Acto
 	}
 	actor = marked
 
-	if err = w.ensureWorkerDiscarded(leaseCtx, actorRef, actor, actorTemplate); err != nil {
+	var actorAssignment *ateapipb.ActorAssignment
+	if actorAssignment, err = w.ensureWorkerDiscarded(leaseCtx, actorRef, actor, actorTemplate); err != nil {
 		return nil, err
 	}
 
@@ -104,8 +105,9 @@ func (w *ActorWorkflow) RevertActor(ctx context.Context, actorRef resources.Acto
 	// FinalizeReverted clears the WorkerAssignment the labels read, so snapshot
 	// them here, as suspend and crash.go do.
 	finalAttrs = lifecycleOpAttrs(actor, actorTemplate, "", "")
+	closeAttrs := activationCloseAttrs(actor.GetStatus().GetWorkerAssignment(), actorAssignment, actorTemplate)
 	var finalized *ateapipb.Actor
-	if finalized, err = w.ensureRevertedFinalized(leaseCtx, actorRef); err != nil {
+	if finalized, err = w.ensureRevertedFinalized(leaseCtx, actorRef, closeAttrs...); err != nil {
 		return nil, err
 	}
 	return finalized, nil
@@ -180,7 +182,7 @@ func (w *ActorWorkflow) ensureMarkedReverting(ctx context.Context, actorRef reso
 // worker. An assignment commits before the actor is updated to point at it, so
 // a crash in between leaves a row nothing references — and a CRASHED actor is
 // the likeliest holder of one. Absence is the ordinary case, not an error.
-func (w *ActorWorkflow) ensureWorkerDiscarded(ctx context.Context, actorRef resources.ActorRef, actor *ateapipb.Actor, actorTemplate *ateapipb.ActorTemplate) (err error) {
+func (w *ActorWorkflow) ensureWorkerDiscarded(ctx context.Context, actorRef resources.ActorRef, actor *ateapipb.Actor, actorTemplate *ateapipb.ActorTemplate) (actorAssignment *ateapipb.ActorAssignment, err error) {
 	ctx, done := stepSpan(ctx, "DiscardWorker")
 	defer func() { err = done(err) }()
 
@@ -190,19 +192,19 @@ func (w *ActorWorkflow) ensureWorkerDiscarded(ctx context.Context, actorRef reso
 			// assignment, so the next revert terminates it again. If the
 			// worker's pod goes away, worker deletion crashes the actor, and
 			// the next revert needs no live worker.
-			return err
+			return nil, err
 		}
 		if err := w.ensureVolumesDetached(ctx, actor, actorTemplate, "DetachVolumesForRevert", ateattr.OperationRevert); err != nil {
-			return err
+			return nil, err
 		}
 		if actor.GetStatus().GetWorkerAssignment() != nil {
-			if _, _, err := releaseWorker(ctx, w.store, actor); err != nil {
-				return fmt.Errorf("while releasing worker: %w", err)
+			if _, _, actorAssignment, err = releaseWorker(ctx, w.store, actor); err != nil {
+				return nil, fmt.Errorf("while releasing worker: %w", err)
 			}
 		}
 	}
 
-	return w.releaseAssignmentWithoutBacklink(ctx, actor)
+	return actorAssignment, w.releaseAssignmentWithoutBacklink(ctx, actor)
 }
 
 // ensureInProgressSnapshotDiscarded deletes the objects a suspend was partway
@@ -242,7 +244,7 @@ func (w *ActorWorkflow) ensureInProgressSnapshotDiscarded(ctx context.Context, a
 // execution that was discarded, in a single update.
 // It re-reads the actor first so an out-of-band transition is not overwritten,
 // and so the version precondition guards what was actually observed.
-func (w *ActorWorkflow) ensureRevertedFinalized(ctx context.Context, actorRef resources.ActorRef) (_ *ateapipb.Actor, err error) {
+func (w *ActorWorkflow) ensureRevertedFinalized(ctx context.Context, actorRef resources.ActorRef, closeAttrs ...slog.Attr) (_ *ateapipb.Actor, err error) {
 	ctx, done := stepSpan(ctx, "FinalizeReverted")
 	defer func() { err = done(err) }()
 
@@ -274,6 +276,6 @@ func (w *ActorWorkflow) ensureRevertedFinalized(ctx context.Context, actorRef re
 		}
 		return nil, err
 	}
-	logActorStateChanged(ctx, storedActor, ateattr.OperationRevert)
+	logActorStateChanged(ctx, storedActor, ateattr.OperationRevert, closeAttrs...)
 	return storedActor, nil
 }

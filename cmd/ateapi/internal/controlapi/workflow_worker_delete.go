@@ -193,7 +193,7 @@ func (w *WorkerWorkflow) releaseBoundActor(ctx context.Context, worker *ateapipb
 		markSkipped(ctx, "actor suspended cleanly before the pod went away")
 		return nil
 	}
-	return w.crashBoundActor(ctx, worker, actorRef, actor, "Releasing actor from a worker whose pod is gone", crashMessageWorkerPodGone)
+	return w.crashBoundActor(ctx, worker, assignment, actorRef, actor, "Releasing actor from a worker whose pod is gone", crashMessageWorkerPodGone)
 }
 
 // crashBoundActor moves an Actor that lost its sandbox on the Worker to
@@ -201,7 +201,7 @@ func (w *WorkerWorkflow) releaseBoundActor(ctx context.Context, worker *ateapipb
 // recorded in the Actor's status. The Actor's assignment row in the worker is
 // left for the caller to release.
 // A concurrent write to the Actor fails this as ABORTED.
-func (w *WorkerWorkflow) crashBoundActor(ctx context.Context, worker *ateapipb.Worker, actorRef resources.ActorRef, actor *ateapipb.Actor, logMsg, crashMsg string) error {
+func (w *WorkerWorkflow) crashBoundActor(ctx context.Context, worker *ateapipb.Worker, assignment *ateapipb.ActorAssignment, actorRef resources.ActorRef, actor *ateapipb.Actor, logMsg, crashMsg string) error {
 	name := worker.GetMetadata().GetName()
 	opName := ateattr.OperationUnknown
 	switch actor.GetStatus().GetState() {
@@ -219,6 +219,7 @@ func (w *WorkerWorkflow) crashBoundActor(ctx context.Context, worker *ateapipb.W
 
 	// Snapshot crash attributes before pod and pool pointers are cleared on actor.
 	crashAttrs := ateattr.ActorMetricAttributes(actor, worker.GetSandboxClass(), opName)
+	closeAttrs := activationCloseAttrs(actor.GetStatus().GetWorkerAssignment(), assignment, nil)
 
 	slog.LogAttrs(ctx, slog.LevelInfo, logMsg,
 		append(ateattr.ActorLogAttrs(resources.ActorAttributionFromActor(actor)),
@@ -243,7 +244,7 @@ func (w *WorkerWorkflow) crashBoundActor(ctx context.Context, worker *ateapipb.W
 	}
 
 	if !wasAlreadyCrashed {
-		logActorCrashed(ctx, actor, opName)
+		logActorCrashed(ctx, actor, opName, closeAttrs...)
 		recordActorCrash(ctx, crashAttrs)
 	}
 	return nil

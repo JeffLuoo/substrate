@@ -87,6 +87,17 @@ var identityKeys = []string{
 	string(ateattr.TemplateNameKey),
 }
 
+// activationCloseKeys are the conditional attributes stamped on a closing
+// lifecycle record (suspended, reverted, deleted, or crashed) when the
+// transition releases an active worker assignment.
+var activationCloseKeys = []string{
+	string(ateattr.ActorEpochKey),
+	string(ateattr.ActorBookedCPUKey),
+	string(ateattr.ActorBookedMemoryKey),
+	string(ateattr.WorkerPoolNamespaceKey),
+	string(ateattr.WorkerPoolNameKey),
+}
+
 // Three names. A crash is its own because it has a different severity; there
 // is no name per state, because ate.actor.state already says which transition
 // happened. UsageSampled is the workers' measurement record.
@@ -98,6 +109,7 @@ var (
 		Keys: append(append([]string{}, identityKeys...),
 			string(ateattr.ActorOperationNameKey),
 			string(ateattr.ActorStateKey)),
+		Conditional: append([]string{}, activationCloseKeys...),
 	}
 
 	Crashed = Event{
@@ -107,6 +119,7 @@ var (
 		Keys: append(append([]string{}, identityKeys...),
 			string(ateattr.ActorOperationNameKey),
 			string(ateattr.ActorStateKey)),
+		Conditional: append([]string{}, activationCloseKeys...),
 	}
 
 	UsageSampled = Event{

@@ -16,6 +16,8 @@ package controlapi
 
 import (
 	"context"
+	"maps"
+	"strconv"
 	"testing"
 
 	"go.ate.dev/substrate/cmd/ateapi/internal/store"
@@ -43,6 +45,7 @@ func TestActorStateChangeRecords(t *testing.T) {
 		transition func(t *testing.T, w *ActorWorkflow, ref resources.ActorRef, actor *ateapipb.Actor, tmpl *ateapipb.ActorTemplate)
 		wantOp     string
 		wantState  string
+		wantExtra  map[string]string
 		wantStored ateapipb.ActorState
 	}{
 		{
@@ -80,8 +83,12 @@ func TestActorStateChangeRecords(t *testing.T) {
 					t.Fatalf("PauseActor: %v", err)
 				}
 			},
-			wantOp:     ateattr.OperationSuspend,
-			wantState:  ateattr.ActorStateSuspended,
+			wantOp:    ateattr.OperationSuspend,
+			wantState: ateattr.ActorStateSuspended,
+			wantExtra: map[string]string{
+				string(ateattr.WorkerPoolNamespaceKey): "worker-ns",
+				string(ateattr.WorkerPoolNameKey):      "pool",
+			},
 			wantStored: ateapipb.ActorState_ACTOR_STATE_SUSPENDED,
 		},
 		{
@@ -148,6 +155,7 @@ func TestActorStateChangeRecords(t *testing.T) {
 				string(ateattr.ActorOperationNameKey): tt.wantOp,
 				string(ateattr.ActorStateKey):         tt.wantState,
 			}
+			maps.Copy(want, tt.wantExtra)
 			for k, wv := range want {
 				if got[k] != wv {
 					t.Errorf("%s = %q, want %q", k, got[k], wv)
@@ -307,4 +315,181 @@ func TestActorStateChangeRecordSkippedOnConflict(t *testing.T) {
 	if len(*records) != 0 {
 		t.Errorf("got %d state records from a losing writer, want 0: %v", len(*records), *records)
 	}
+}
+
+// TestClosingLifecycleRecordsCarryActivationFields verifies that closing
+// lifecycle records (suspend, revert, delete, crash, and worker-delete crash)
+// carry ate.actor.epoch, ate.actor.booked.cpu, ate.actor.booked.memory,
+// ate.workerpool.namespace, and ate.workerpool.name from the released worker
+// assignment.
+func TestClosingLifecycleRecordsCarryActivationFields(t *testing.T) {
+	const (
+		tmplAtespace = "ns"
+		tmplName     = "tmpl1"
+		workerName   = "worker-1"
+		poolNS       = "worker-ns"
+		poolName     = "pool"
+	)
+
+	seedBoundActor := func(t *testing.T, ctx context.Context, st store.Interface, state ateapipb.ActorState, extraOpts ...func(*ateapipb.Actor)) (*ateapipb.Actor, *ateapipb.ActorTemplate, *ateapipb.Worker, *ateapipb.ActorAssignment) {
+		t.Helper()
+		storetest.MustCreateAtespace(t, ctx, st, tmplAtespace)
+		tmpl, err := st.CreateActorTemplate(ctx, &ateapipb.ActorTemplate{
+			Metadata:       &ateapipb.ResourceMetadata{Atespace: tmplAtespace, Name: tmplName},
+			SnapshotConfig: &ateapipb.SnapshotConfig{StorageLocation: testStorageLocation},
+			Resources: &ateapipb.Resources{
+				Limits: []*ateapipb.Limits{
+					{Name: resources.ResourceCPU, Quantity: "250m"},
+					{Name: resources.ResourceMemory, Quantity: "512Mi"},
+				},
+			},
+		})
+		if err != nil {
+			t.Fatalf("CreateActorTemplate: %v", err)
+		}
+
+		worker, err := st.CreateWorker(ctx, &ateapipb.Worker{
+			Metadata:        &ateapipb.ResourceMetadata{Name: workerName},
+			WorkerNamespace: poolNS,
+			WorkerPool:      poolName,
+			WorkerPod:       "pod-1",
+			WorkerPodUid:    "pod-uid-1",
+			NodeName:        "node-1",
+			SandboxClass:    "gvisor",
+			Status:          &ateapipb.WorkerStatus{},
+		})
+		if err != nil {
+			t.Fatalf("CreateWorker: %v", err)
+		}
+
+		actorRef := resources.ActorRef{Atespace: "team-a", Name: "id1"}
+		opts := append([]func(*ateapipb.Actor){
+			func(a *ateapipb.Actor) {
+				a.Status.AssignedNode = "node-1"
+				a.Status.WorkerAssignment = wireTestAssignment()
+			},
+		}, extraOpts...)
+		seedWorkflowActor(t, ctx, st, actorRef, tmplAtespace, tmplName, state, opts...)
+		actor, err := st.GetActor(ctx, actorRef)
+		if err != nil {
+			t.Fatalf("GetActor: %v", err)
+		}
+
+		seedAssignment(t, st, workerName, &ateapipb.ActorAssignment{
+			Actor:    &ateapipb.ObjectRef{Atespace: actorRef.Atespace, Name: actorRef.Name},
+			ActorUid: actor.GetMetadata().GetUid(),
+			Resources: &ateapipb.Resources{
+				Limits: []*ateapipb.Limits{
+					{Name: resources.ResourceCPU, Quantity: "250m"},
+					{Name: resources.ResourceMemory, Quantity: "512Mi"},
+				},
+			},
+		})
+		assignment, err := st.GetWorkerAssignment(ctx, workerName, actor.GetMetadata().GetUid())
+		if err != nil {
+			t.Fatalf("GetWorkerAssignment: %v", err)
+		}
+		return actor, tmpl, worker, assignment
+	}
+
+	assertActivationAttrs := func(t *testing.T, got map[string]string, assignment *ateapipb.ActorAssignment) {
+		t.Helper()
+		wantEpoch := strconv.FormatInt(assignment.GetMetadata().GetCreateTime().AsTime().UnixNano(), 10)
+		want := map[string]string{
+			string(ateattr.ActorEpochKey):          wantEpoch,
+			string(ateattr.ActorBookedCPUKey):      "0.25",
+			string(ateattr.ActorBookedMemoryKey):   strconv.FormatInt(512<<20, 10),
+			string(ateattr.WorkerPoolNamespaceKey): poolNS,
+			string(ateattr.WorkerPoolNameKey):      poolName,
+		}
+		for k, wv := range want {
+			if got[k] != wv {
+				t.Errorf("%s = %q, want %q (all attrs: %v)", k, got[k], wv, got)
+			}
+		}
+	}
+
+	t.Run("suspend finalized", func(t *testing.T) {
+		ctx := context.Background()
+		events := otlpEvents(t)
+		st := newTestPersistence(t)
+		actor, _, _, assignment := seedBoundActor(t, ctx, st, ateapipb.ActorState_ACTOR_STATE_SUSPENDING, withPauseInProgress())
+		w, _ := newWireCaptureWorkflow(t, st)
+		if _, err := w.PauseActor(ctx, resources.ActorRefFromActor(actor)); err != nil {
+			t.Fatalf("PauseActor: %v", err)
+		}
+		gotEvents := events()
+		if len(gotEvents) != 1 {
+			t.Fatalf("got %d events, want 1", len(gotEvents))
+		}
+		assertActivationAttrs(t, gotEvents[0].attrs, assignment)
+	})
+
+	t.Run("revert finalized", func(t *testing.T) {
+		ctx := context.Background()
+		events := otlpEvents(t)
+		st := newTestPersistence(t)
+		actor, _, _, assignment := seedBoundActor(t, ctx, st, ateapipb.ActorState_ACTOR_STATE_REVERTING)
+		w, _ := newWireCaptureWorkflow(t, st)
+		if _, err := w.RevertActor(ctx, resources.ActorRefFromActor(actor)); err != nil {
+			t.Fatalf("RevertActor: %v", err)
+		}
+		gotEvents := events()
+		if len(gotEvents) != 1 {
+			t.Fatalf("got %d events, want 1", len(gotEvents))
+		}
+		assertActivationAttrs(t, gotEvents[0].attrs, assignment)
+	})
+
+	t.Run("delete finalized", func(t *testing.T) {
+		ctx := context.Background()
+		events := otlpEvents(t)
+		st := newTestPersistence(t)
+		actor, _, _, assignment := seedBoundActor(t, ctx, st, ateapipb.ActorState_ACTOR_STATE_DELETING)
+		w, _ := newWireCaptureWorkflow(t, st)
+		if _, err := w.DeleteActor(ctx, resources.ActorRefFromActor(actor), true, store.DeletePreconditions{}); err != nil {
+			t.Fatalf("DeleteActor: %v", err)
+		}
+		gotEvents := events()
+		if len(gotEvents) != 1 {
+			t.Fatalf("got %d events, want 1", len(gotEvents))
+		}
+		if gotEvents[0].attrs[string(ateattr.ActorStateKey)] != ateattr.ActorStateDeleted {
+			t.Errorf("state = %q, want %q", gotEvents[0].attrs[string(ateattr.ActorStateKey)], ateattr.ActorStateDeleted)
+		}
+		assertActivationAttrs(t, gotEvents[0].attrs, assignment)
+	})
+
+	t.Run("crashActor", func(t *testing.T) {
+		ctx := context.Background()
+		events := otlpEvents(t)
+		st := newTestPersistence(t)
+		actor, _, _, assignment := seedBoundActor(t, ctx, st, ateapipb.ActorState_ACTOR_STATE_RUNNING)
+		if err := crashActor(ctx, st, resources.ActorRefFromActor(actor), ateattr.OperationResume, "boom"); err != nil {
+			t.Fatalf("crashActor: %v", err)
+		}
+		gotEvents := events()
+		if len(gotEvents) != 1 {
+			t.Fatalf("got %d events, want 1", len(gotEvents))
+		}
+		assertEvent(t, gotEvents[0], actorevent.Crashed)
+		assertActivationAttrs(t, gotEvents[0].attrs, assignment)
+	})
+
+	t.Run("worker delete crashBoundActor", func(t *testing.T) {
+		ctx := context.Background()
+		events := otlpEvents(t)
+		st := newTestPersistence(t)
+		_, _, worker, assignment := seedBoundActor(t, ctx, st, ateapipb.ActorState_ACTOR_STATE_RUNNING)
+		ww := NewWorkerWorkflow(st)
+		if _, err := ww.DeleteWorker(ctx, worker.GetMetadata().GetName(), store.DeletePreconditions{}); err != nil {
+			t.Fatalf("DeleteWorker: %v", err)
+		}
+		gotEvents := events()
+		if len(gotEvents) != 1 {
+			t.Fatalf("got %d events, want 1", len(gotEvents))
+		}
+		assertEvent(t, gotEvents[0], actorevent.Crashed)
+		assertActivationAttrs(t, gotEvents[0].attrs, assignment)
+	})
 }

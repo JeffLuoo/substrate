@@ -66,6 +66,31 @@ groups:
         requirement_level: required
       - ref: ate.actor.state
         requirement_level: required
+      - ref: ate.actor.epoch
+        requirement_level:
+          conditionally_required: >
+            When the transition closes an active worker assignment and its
+            creation timestamp is known.
+      - ref: ate.actor.booked.cpu
+        requirement_level:
+          conditionally_required: >
+            When the transition closes an active worker assignment with a
+            non-zero CPU reservation.
+      - ref: ate.actor.booked.memory
+        requirement_level:
+          conditionally_required: >
+            When the transition closes an active worker assignment with a
+            non-zero memory reservation.
+      - ref: ate.workerpool.namespace
+        requirement_level:
+          conditionally_required: >
+            When the transition closes an active worker assignment that names a
+            WorkerPool.
+      - ref: ate.workerpool.name
+        requirement_level:
+          conditionally_required: >
+            When the transition closes an active worker assignment that names a
+            WorkerPool.
 
   - id: event.ate.actor.crashed
     type: event
@@ -99,6 +124,31 @@ groups:
         requirement_level: required
       - ref: ate.actor.state
         requirement_level: required
+      - ref: ate.actor.epoch
+        requirement_level:
+          conditionally_required: >
+            When the crash closes an active worker assignment and its creation
+            timestamp is known.
+      - ref: ate.actor.booked.cpu
+        requirement_level:
+          conditionally_required: >
+            When the crash closes an active worker assignment with a non-zero
+            CPU reservation.
+      - ref: ate.actor.booked.memory
+        requirement_level:
+          conditionally_required: >
+            When the crash closes an active worker assignment with a non-zero
+            memory reservation.
+      - ref: ate.workerpool.namespace
+        requirement_level:
+          conditionally_required: >
+            When the crash closes an active worker assignment that names a
+            WorkerPool.
+      - ref: ate.workerpool.name
+        requirement_level:
+          conditionally_required: >
+            When the crash closes an active worker assignment that names a
+            WorkerPool.
 
   - id: event.ate.actor.usage_sampled
     type: event

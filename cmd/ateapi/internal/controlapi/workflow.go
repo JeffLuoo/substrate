@@ -81,22 +81,56 @@ func markSkipped(ctx context.Context, reason string) {
 //
 // Crashes go through logActorCrashed instead, so read the state off
 // ate.actor.state rather than off the message.
-func logActorStateChanged(ctx context.Context, actor *ateapipb.Actor, opName string) {
-	logActorState(ctx, actor, opName, ateattr.ActorStateValue(actor.GetStatus().GetState()))
+func logActorStateChanged(ctx context.Context, actor *ateapipb.Actor, opName string, extra ...slog.Attr) {
+	logActorState(ctx, actor, opName, ateattr.ActorStateValue(actor.GetStatus().GetState()), extra...)
 }
 
 // logActorDeleted records the terminal transition. The row is gone, so there is
 // no committed state left to read and this is the one state named by hand.
-func logActorDeleted(ctx context.Context, actor *ateapipb.Actor, opName string) {
-	logActorState(ctx, actor, opName, ateattr.ActorStateDeleted)
+func logActorDeleted(ctx context.Context, actor *ateapipb.Actor, opName string, extra ...slog.Attr) {
+	logActorState(ctx, actor, opName, ateattr.ActorStateDeleted, extra...)
 }
 
-func logActorState(ctx context.Context, actor *ateapipb.Actor, opName, state string) {
+func logActorState(ctx context.Context, actor *ateapipb.Actor, opName, state string, extra ...slog.Attr) {
 	attrs := ateattr.ActorLogAttrs(resources.ActorAttributionFromActor(actor))
 	attrs = append(attrs,
 		slog.String(string(ateattr.ActorOperationNameKey), ateattr.NormalizeOperationName(opName)),
 		slog.String(string(ateattr.ActorStateKey), state))
+	attrs = append(attrs, extra...)
 	actorevent.Log(ctx, actorevent.StateChanged, attrs)
+}
+
+// activationCloseAttrs builds the conditional attributes for a closing
+// lifecycle record (suspended, reverted, deleted, or crashed) that releases an
+// active worker assignment: the activation start time (epoch), the booked CPU
+// and memory reservations, and the worker pool identity. Returns nil when the
+// transition did not release a worker assignment.
+func activationCloseAttrs(workerAssignment *ateapipb.WorkerAssignment, actorAssignment *ateapipb.ActorAssignment, tmpl *ateapipb.ActorTemplate) []slog.Attr {
+	if workerAssignment == nil && actorAssignment == nil {
+		return nil
+	}
+	var attrs []slog.Attr
+	if ct := actorAssignment.GetMetadata().GetCreateTime(); ct != nil && ct.IsValid() && !ct.AsTime().IsZero() {
+		attrs = append(attrs, slog.Int64(string(ateattr.ActorEpochKey), ct.AsTime().UnixNano()))
+	}
+	res := actorAssignment.GetResources()
+	if len(res.GetLimits()) == 0 {
+		res = tmpl.GetResources()
+	}
+	if quantities, err := resources.ParseQuantities(res); err == nil {
+		if cpuQ, ok := quantities[resources.ResourceCPU]; ok && !cpuQ.IsZero() {
+			attrs = append(attrs, slog.Float64(string(ateattr.ActorBookedCPUKey), cpuQ.AsApproximateFloat64()))
+		}
+		if memQ, ok := quantities[resources.ResourceMemory]; ok && !memQ.IsZero() {
+			attrs = append(attrs, slog.Int64(string(ateattr.ActorBookedMemoryKey), memQ.Value()))
+		}
+	}
+	if ns, pool := workerAssignment.GetWorkerNamespace(), workerAssignment.GetWorkerPool(); ns != "" && pool != "" {
+		attrs = append(attrs,
+			slog.String(string(ateattr.WorkerPoolNamespaceKey), ns),
+			slog.String(string(ateattr.WorkerPoolNameKey), pool))
+	}
+	return attrs
 }
 
 // ActorWorkflow handles the workflows for actor's resume / suspend operations.

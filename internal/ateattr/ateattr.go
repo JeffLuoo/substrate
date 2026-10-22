@@ -175,9 +175,14 @@ const (
 //
 // ActorEpochKey identifies one activation of an actor, a Run or Restore, as the
 // unix-nano time it began. It is the boundary of ate.stats.cpu.time, which
-// restarts at zero with each activation.
+// restarts at zero with each activation, and is also stamped on the closing
+// lifecycle record that ends an activation. ActorBookedCPUKey (cores) and
+// ActorBookedMemoryKey (bytes) carry the resource reservation that activation
+// booked on its worker.
 const (
 	ActorEpochKey            = attribute.Key("ate.actor.epoch")
+	ActorBookedCPUKey        = attribute.Key("ate.actor.booked.cpu")
+	ActorBookedMemoryKey     = attribute.Key("ate.actor.booked.memory")
 	StatsKindKey             = attribute.Key("ate.stats.kind")
 	StatsMemoryUsageKey      = attribute.Key("ate.stats.memory.usage")
 	StatsMemoryPeakKey       = attribute.Key("ate.stats.memory.peak")
