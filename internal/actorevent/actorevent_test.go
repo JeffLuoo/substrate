@@ -520,3 +520,22 @@ func TestSetConsoleWritesBoth(t *testing.T) {
 		t.Errorf("timestamps differ: stdout %v, OTLP %v", stdout.records[0].Time, exp.records[0].Timestamp())
 	}
 }
+
+func TestIsLifecycleEvent(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name string
+		want bool
+	}{
+		{StateChanged.Name, true},
+		{Crashed.Name, true},
+		{UsageSampled.Name, false},
+		{"", false},
+		{"ate.actor.other", false},
+	} {
+		if got := IsLifecycleEvent(tc.name); got != tc.want {
+			t.Errorf("IsLifecycleEvent(%q) = %v, want %v", tc.name, got, tc.want)
+		}
+	}
+}

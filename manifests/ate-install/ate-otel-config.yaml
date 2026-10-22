@@ -33,3 +33,7 @@ metadata:
   namespace: ate-system
 data:
   OTEL_EXPORTER_OTLP_ENDPOINT: http://opentelemetry-collector.gke-managed-otel.svc.cluster.local:4317
+  # Optional: send ate-api-server actor lifecycle events
+  # (ate.actor.state_changed, ate.actor.crashed) directly to an mTLS OTLP/gRPC
+  # receiver such as FinOps, bypassing the collector.
+  # ATE_API_LIFECYCLE_EVENTS_OTLP_ENDPOINT: finops.ate-finops.svc:4317

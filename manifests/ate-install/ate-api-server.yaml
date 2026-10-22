@@ -141,6 +141,14 @@ spec:
           - --actor-id-ca-pool=/run/actor-id-ca-pool/pool.json
           - --atelet-client-cred-bundle=/run/podidentity.podcert.ate.dev/credential-bundle.pem
           - --pod-identity-ca-certs=/run/podidentity.podcert.ate.dev/trust-bundle.pem
+          # Optional direct OTLP/gRPC mTLS export of actor lifecycle events
+          # (ate.actor.state_changed and ate.actor.crashed), e.g. to FinOps.
+          # Client identity defaults to --atelet-client-cred-bundle
+          # (spiffe://cluster.local/ns/ate-system/sa/ate-api-server). Set
+          # ATE_API_LIFECYCLE_EVENTS_OTLP_ENDPOINT in ate-otel-config or
+          # uncomment --lifecycle-events-otlp-endpoint below to enable.
+          - --lifecycle-events-otlp-ca-file=/run/servicedns.podcert.ate.dev/trust-bundle.pem
+          # - --lifecycle-events-otlp-endpoint=finops.ate-finops.svc:4317
           # TODO(lior):Remove when egress API pr is merged. This turns on pluggable actor
           # egress cluster-wide. ateapi stamps this address onto every atelet
           # Run/Restore, ateworker hands it to atunnel, and actor TCP egress is

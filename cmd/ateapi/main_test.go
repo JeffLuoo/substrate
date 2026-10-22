@@ -327,3 +327,59 @@ func TestRejectStorageEnv(t *testing.T) {
 }
 
 func ptr(s string) *string { return &s }
+
+func TestBuildLifecycleOTLPOptionsAndEnvFallback(t *testing.T) {
+	origEndpoint := *lifecycleEventsOTLPEndpoint
+	origCA := *lifecycleEventsOTLPCAFile
+	origClientCred := *lifecycleEventsOTLPClientCredBundle
+	origServerName := *lifecycleEventsOTLPServerName
+	origAteletCred := *ateletClientCredBundle
+	t.Cleanup(func() {
+		*lifecycleEventsOTLPEndpoint = origEndpoint
+		*lifecycleEventsOTLPCAFile = origCA
+		*lifecycleEventsOTLPClientCredBundle = origClientCred
+		*lifecycleEventsOTLPServerName = origServerName
+		*ateletClientCredBundle = origAteletCred
+	})
+
+	*ateletClientCredBundle = "/run/podidentity.podcert.ate.dev/credential-bundle.pem"
+	*lifecycleEventsOTLPEndpoint = ""
+	*lifecycleEventsOTLPCAFile = "/run/servicedns.podcert.ate.dev/trust-bundle.pem"
+	*lifecycleEventsOTLPClientCredBundle = ""
+	*lifecycleEventsOTLPServerName = ""
+
+	t.Setenv("ATE_API_LIFECYCLE_EVENTS_OTLP_ENDPOINT", "finops.ate-finops.svc:4317")
+	t.Setenv("ATE_API_LIFECYCLE_EVENTS_OTLP_SERVER_NAME", "finops.ate-finops.svc")
+
+	if err := loadFlagsFromEnv(); err != nil {
+		t.Fatalf("loadFlagsFromEnv() error = %v", err)
+	}
+
+	opts := buildLifecycleOTLPOptions()
+	if opts.Endpoint != "finops.ate-finops.svc:4317" {
+		t.Errorf("Endpoint = %q, want %q", opts.Endpoint, "finops.ate-finops.svc:4317")
+	}
+	if opts.CAFile != "/run/servicedns.podcert.ate.dev/trust-bundle.pem" {
+		t.Errorf("CAFile = %q, want %q", opts.CAFile, "/run/servicedns.podcert.ate.dev/trust-bundle.pem")
+	}
+	// When --lifecycle-events-otlp-client-cred-bundle is empty, it falls back
+	// to --atelet-client-cred-bundle (the podidentity bundle).
+	if opts.ClientCredBundle != "/run/podidentity.podcert.ate.dev/credential-bundle.pem" {
+		t.Errorf("ClientCredBundle = %q, want %q", opts.ClientCredBundle, "/run/podidentity.podcert.ate.dev/credential-bundle.pem")
+	}
+	if opts.ServerName != "finops.ate-finops.svc" {
+		t.Errorf("ServerName = %q, want %q", opts.ServerName, "finops.ate-finops.svc")
+	}
+
+	// Explicit --lifecycle-events-otlp-client-cred-bundle overrides --atelet-client-cred-bundle,
+	// and @env resolves from ATE_API_LIFECYCLE_EVENTS_OTLP_CLIENT_CRED_BUNDLE.
+	*lifecycleEventsOTLPClientCredBundle = "@env"
+	t.Setenv("ATE_API_LIFECYCLE_EVENTS_OTLP_CLIENT_CRED_BUNDLE", "/custom/cred-bundle.pem")
+	if err := loadFlagsFromEnv(); err != nil {
+		t.Fatalf("loadFlagsFromEnv() error = %v", err)
+	}
+	opts = buildLifecycleOTLPOptions()
+	if opts.ClientCredBundle != "/custom/cred-bundle.pem" {
+		t.Errorf("ClientCredBundle = %q, want %q", opts.ClientCredBundle, "/custom/cred-bundle.pem")
+	}
+}

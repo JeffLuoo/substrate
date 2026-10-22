@@ -16,18 +16,30 @@ package serverboot
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
+	"errors"
 	"fmt"
 	"log/slog"
+	"net"
+	"net/url"
+	"strconv"
+	"strings"
 
 	"go.opentelemetry.io/otel/exporters/otlp/otlplog/otlploggrpc"
 	"go.opentelemetry.io/otel/log/global"
 	sdklog "go.opentelemetry.io/otel/sdk/log"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials"
 
 	"go.ate.dev/substrate/internal/actorevent"
+	"go.ate.dev/substrate/internal/credbundle"
 )
 
-const logsExporterEnv = "OTEL_LOGS_EXPORTER"
+const (
+	logsExporterEnv     = "OTEL_LOGS_EXPORTER"
+	defaultOTLPGRPCPort = "4317"
+)
 
 // logsExporters are the names OTEL_LOGS_EXPORTER accepts. console is the
 // actor events' stdout form, the component's own JSON log line.
@@ -38,6 +50,33 @@ var logsExporters = []string{ExporterOTLP, ExporterConsole}
 // ConfigMap key per environment.
 func ResolveLogsExporter(ctx context.Context) Exporters {
 	return resolveExportersEnv(ctx, logsExporterEnv, logsExporters, Exporters{})
+}
+
+// LifecycleOTLPOptions configures an opt-in second OTLP/gRPC log exporter that
+// receives only actor lifecycle events (ate.actor.state_changed and
+// ate.actor.crashed) over mutual TLS. An empty Endpoint (and nil ExporterConn)
+// disables it.
+type LifecycleOTLPOptions struct {
+	// Endpoint is the target OTLP/gRPC endpoint (host:port, host defaulting to
+	// port 4317, or https://host[:port]). Empty disables the exporter.
+	Endpoint string
+	// CAFile is the PEM trust bundle used to verify the receiver's serving
+	// certificate. Required when Endpoint is set and ExporterConn is nil.
+	CAFile string
+	// ClientCredBundle is the PEM credential bundle (PKCS#8 private key +
+	// certificate chain) presented as the client certificate. Required when
+	// Endpoint is set and ExporterConn is nil.
+	ClientCredBundle string
+	// ServerName overrides the TLS SNI / DNS name verified against the server
+	// certificate. Defaults to the host parsed from Endpoint.
+	ServerName string
+	// ExporterConn overrides the gRPC connection used by the exporter (for
+	// tests).
+	ExporterConn *grpc.ClientConn
+}
+
+func (o LifecycleOTLPOptions) enabled() bool {
+	return strings.TrimSpace(o.Endpoint) != "" || o.ExporterConn != nil
 }
 
 // LoggingOptions configures InitLogging.
@@ -52,15 +91,20 @@ type LoggingOptions struct {
 	// relay-capable so the resource carries ate.otlp.relay.
 	ExporterConn *grpc.ClientConn
 	RelayCapable bool
+	// LifecycleOTLP optionally configures a second, filtered OTLP/gRPC log
+	// exporter that receives only ate.actor.state_changed and ate.actor.crashed
+	// records over mTLS.
+	LifecycleOTLP LifecycleOTLPOptions
 }
 
 // InitLogging registers a global LoggerProvider for the records components emit
 // through internal/actorevent, and sets whether those records also go to stdout
 // (console).
 //
-// It returns (nil, nil) when the exporter does not include otlp, and leaves the
-// OTel global alone: emitting then costs one Enabled check. Guard the shutdown
-// on a nil provider, unlike InitTracing which always returns one.
+// It returns (nil, nil) when neither the default OTLP exporter nor the
+// lifecycle OTLP exporter is enabled, and leaves the OTel global alone:
+// emitting then costs one Enabled check. Guard the shutdown on a nil provider,
+// unlike InitTracing which always returns one.
 //
 // The processor batches. These records sit on the actor resume and suspend
 // path, and exporting inside the emit call would put a blocking gRPC round trip
@@ -75,8 +119,12 @@ func InitLogging(ctx context.Context, opts LoggingOptions) (*sdklog.LoggerProvid
 	if opts.Exporter == nil {
 		return nil, fmt.Errorf("LoggingOptions.Exporter is required")
 	}
-	actorevent.SetConsole(opts.Exporter.Has(ExporterConsole))
-	if !opts.Exporter.Has(ExporterOTLP) {
+	hasDefaultOTLP := opts.Exporter.Has(ExporterOTLP)
+	hasLifecycle := opts.LifecycleOTLP.enabled()
+	// When the default exporter does not include otlp, actor events belong on
+	// stdout even if the extra lifecycle OTLP exporter installs a provider.
+	actorevent.SetConsole(opts.Exporter.Has(ExporterConsole) || (hasLifecycle && !hasDefaultOTLP))
+	if !hasDefaultOTLP && !hasLifecycle {
 		slog.InfoContext(ctx, "OTLP logs export disabled", slog.String("exporter", opts.Exporter.String()))
 		return nil, nil
 	}
@@ -86,7 +134,10 @@ func InitLogging(ctx context.Context, opts LoggingOptions) (*sdklog.LoggerProvid
 		return nil, err
 	}
 	global.SetLoggerProvider(lp)
-	slog.InfoContext(ctx, "Logging initialized", slog.String("exporter", opts.Exporter.String()))
+	slog.InfoContext(ctx, "Logging initialized",
+		slog.String("exporter", opts.Exporter.String()),
+		slog.Bool("lifecycle-otlp-exporter", hasLifecycle),
+	)
 	return lp, nil
 }
 
@@ -101,25 +152,201 @@ func newLoggerProvider(ctx context.Context, opts LoggingOptions) (*sdklog.Logger
 		return nil, fmt.Errorf("create logger resource: %w", err)
 	}
 
-	// Matches the trace and metric exporters: GKE managed telemetry does not
-	// support validating the TLS certs of the collector.
-	expOpts := []otlploggrpc.Option{otlploggrpc.WithInsecure()}
-	if opts.ExporterConn != nil {
-		// WithGRPCConn takes precedence over endpoint/credential options, so
-		// WithInsecure above is inert on this path.
-		expOpts = append(expOpts, otlploggrpc.WithGRPCConn(opts.ExporterConn))
-	}
-	exporter, err := otlploggrpc.New(ctx, expOpts...)
-	if err != nil {
-		return nil, fmt.Errorf("create OTLP log exporter: %w", err)
-	}
-
 	popts := []sdklog.LoggerProviderOption{
 		sdklog.WithResource(res),
-		sdklog.WithProcessor(sdklog.NewBatchProcessor(exporter)),
 	}
+
+	if opts.Exporter.Has(ExporterOTLP) {
+		// Matches the trace and metric exporters: GKE managed telemetry does not
+		// support validating the TLS certs of the collector.
+		expOpts := []otlploggrpc.Option{otlploggrpc.WithInsecure()}
+		if opts.ExporterConn != nil {
+			// WithGRPCConn takes precedence over endpoint/credential options, so
+			// WithInsecure above is inert on this path.
+			expOpts = append(expOpts, otlploggrpc.WithGRPCConn(opts.ExporterConn))
+		}
+		exporter, err := otlploggrpc.New(ctx, expOpts...)
+		if err != nil {
+			return nil, fmt.Errorf("create OTLP log exporter: %w", err)
+		}
+		popts = append(popts, sdklog.WithProcessor(sdklog.NewBatchProcessor(exporter)))
+	}
+
+	if opts.LifecycleOTLP.enabled() {
+		lifecycleExp, err := newLifecycleOTLPExporter(ctx, opts.LifecycleOTLP)
+		if err != nil {
+			return nil, err
+		}
+		popts = append(popts, sdklog.WithProcessor(NewLifecycleFilterProcessor(sdklog.NewBatchProcessor(lifecycleExp))))
+	}
+
 	for _, p := range testLogProcessors {
 		popts = append(popts, sdklog.WithProcessor(p))
 	}
 	return sdklog.NewLoggerProvider(popts...), nil
+}
+
+func newLifecycleOTLPExporter(ctx context.Context, opts LifecycleOTLPOptions) (sdklog.Exporter, error) {
+	var expOpts []otlploggrpc.Option
+	if opts.ExporterConn != nil {
+		expOpts = append(expOpts, otlploggrpc.WithGRPCConn(opts.ExporterConn))
+	} else {
+		hostPort, serverName, err := ParseLifecycleOTLPEndpoint(opts.Endpoint)
+		if err != nil {
+			return nil, err
+		}
+		tlsCfg, err := BuildLifecycleOTLPTLSConfig(opts, serverName)
+		if err != nil {
+			return nil, err
+		}
+		expOpts = append(expOpts,
+			otlploggrpc.WithEndpoint(hostPort),
+			otlploggrpc.WithTLSCredentials(credentials.NewTLS(tlsCfg)),
+		)
+	}
+	exporter, err := otlploggrpc.New(ctx, expOpts...)
+	if err != nil {
+		return nil, fmt.Errorf("create lifecycle OTLP log exporter: %w", err)
+	}
+	return exporter, nil
+}
+
+// ParseLifecycleOTLPEndpoint parses an OTLP/gRPC endpoint string (host:port,
+// host, or https://host[:port]) into a host:port dial target and default TLS
+// server name. Plaintext http:// endpoints are rejected because the lifecycle
+// exporter requires mTLS.
+func ParseLifecycleOTLPEndpoint(raw string) (hostPort, serverName string, err error) {
+	s := strings.TrimSpace(raw)
+	if s == "" {
+		return "", "", errors.New("lifecycle OTLP endpoint is empty")
+	}
+	target := s
+	if strings.Contains(s, "://") {
+		u, err := url.Parse(s)
+		if err != nil {
+			return "", "", fmt.Errorf("parse lifecycle OTLP endpoint %q: %w", raw, err)
+		}
+		if u.Scheme != "https" {
+			return "", "", fmt.Errorf("lifecycle OTLP endpoint %q must use https or host:port, got scheme %q", raw, u.Scheme)
+		}
+		if u.User != nil || (u.Path != "" && u.Path != "/") || u.RawQuery != "" || u.Fragment != "" {
+			return "", "", fmt.Errorf("lifecycle OTLP endpoint %q must not contain userinfo, path, query, or fragment", raw)
+		}
+		target = u.Host
+	} else if strings.ContainsAny(s, "/?#") {
+		return "", "", fmt.Errorf("lifecycle OTLP endpoint %q must not contain path, query, or fragment", raw)
+	}
+
+	host, port, splitErr := net.SplitHostPort(target)
+	if splitErr != nil {
+		trimmed := strings.TrimPrefix(strings.TrimSuffix(target, "]"), "[")
+		if trimmed == "" || strings.Contains(trimmed, "]") || strings.Contains(trimmed, "[") {
+			return "", "", fmt.Errorf("invalid lifecycle OTLP endpoint %q: %w", raw, splitErr)
+		}
+		if strings.Contains(trimmed, ":") && net.ParseIP(trimmed) == nil {
+			return "", "", fmt.Errorf("invalid lifecycle OTLP endpoint %q: %w", raw, splitErr)
+		}
+		host = trimmed
+		port = defaultOTLPGRPCPort
+	}
+	if host == "" {
+		return "", "", fmt.Errorf("lifecycle OTLP endpoint %q is missing a host", raw)
+	}
+	portNum, err := strconv.Atoi(port)
+	if err != nil || portNum < 1 || portNum > 65535 {
+		return "", "", fmt.Errorf("lifecycle OTLP endpoint %q has invalid port %q", raw, port)
+	}
+	return net.JoinHostPort(host, port), host, nil
+}
+
+// BuildLifecycleOTLPTLSConfig constructs the client mTLS configuration for the
+// lifecycle OTLP exporter. Both the server CA trust bundle and the client
+// credential bundle are validated at startup and reloaded on disk change on
+// subsequent handshakes.
+func BuildLifecycleOTLPTLSConfig(opts LifecycleOTLPOptions, defaultServerName string) (*tls.Config, error) {
+	if opts.CAFile == "" {
+		return nil, errors.New("lifecycle OTLP exporter requires --lifecycle-events-otlp-ca-file")
+	}
+	if opts.ClientCredBundle == "" {
+		return nil, errors.New("lifecycle OTLP exporter requires --lifecycle-events-otlp-client-cred-bundle")
+	}
+	loadRootCAs := credbundle.PoolLoader(opts.CAFile)
+	if _, err := loadRootCAs(); err != nil {
+		return nil, fmt.Errorf("load lifecycle OTLP CA file: %w", err)
+	}
+	loadClientCert := credbundle.ClientLoader(opts.ClientCredBundle)
+	if _, err := loadClientCert(nil); err != nil {
+		return nil, fmt.Errorf("load lifecycle OTLP client credential bundle: %w", err)
+	}
+	serverName := opts.ServerName
+	if serverName == "" {
+		serverName = defaultServerName
+	}
+	tlsCfg := &tls.Config{
+		MinVersion:           tls.VersionTLS13,
+		ServerName:           serverName,
+		GetClientCertificate: loadClientCert,
+		// Chain and hostname verification run in VerifyConnection against the
+		// reloadable CA pool so trust-bundle rotations apply without a restart.
+		InsecureSkipVerify: true, //nolint:gosec
+		VerifyConnection: func(cs tls.ConnectionState) error {
+			pool, err := loadRootCAs()
+			if err != nil {
+				return err
+			}
+			if len(cs.PeerCertificates) == 0 {
+				return errors.New("lifecycle OTLP server presented no certificate")
+			}
+			inter := x509.NewCertPool()
+			for _, c := range cs.PeerCertificates[1:] {
+				inter.AddCert(c)
+			}
+			dnsName := serverName
+			if dnsName == "" {
+				dnsName = cs.ServerName
+			}
+			_, err = cs.PeerCertificates[0].Verify(x509.VerifyOptions{
+				Roots:         pool,
+				Intermediates: inter,
+				DNSName:       dnsName,
+			})
+			return err
+		},
+	}
+	return tlsCfg, nil
+}
+
+// lifecycleFilterProcessor wraps a sdklog.Processor and forwards only actor
+// lifecycle events (ate.actor.state_changed and ate.actor.crashed).
+type lifecycleFilterProcessor struct {
+	next sdklog.Processor
+}
+
+// NewLifecycleFilterProcessor returns a sdklog.Processor that forwards only
+// actor lifecycle records (ate.actor.state_changed and ate.actor.crashed) to
+// next.
+func NewLifecycleFilterProcessor(next sdklog.Processor) sdklog.Processor {
+	return &lifecycleFilterProcessor{next: next}
+}
+
+func (p *lifecycleFilterProcessor) OnEmit(ctx context.Context, r *sdklog.Record) error {
+	if !actorevent.IsLifecycleEvent(r.EventName()) {
+		return nil
+	}
+	return p.next.OnEmit(ctx, r)
+}
+
+func (p *lifecycleFilterProcessor) Enabled(ctx context.Context, params sdklog.EnabledParameters) bool {
+	if !actorevent.IsLifecycleEvent(params.EventName) {
+		return false
+	}
+	return p.next.Enabled(ctx, params)
+}
+
+func (p *lifecycleFilterProcessor) Shutdown(ctx context.Context) error {
+	return p.next.Shutdown(ctx)
+}
+
+func (p *lifecycleFilterProcessor) ForceFlush(ctx context.Context) error {
+	return p.next.ForceFlush(ctx)
 }

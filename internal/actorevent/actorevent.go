@@ -148,6 +148,12 @@ var (
 // out of it is never checked against docs/metrics/registry/events.yaml.
 var events = []Event{StateChanged, Crashed, UsageSampled}
 
+// IsLifecycleEvent reports whether eventName is an actor lifecycle event
+// (ate.actor.state_changed or ate.actor.crashed).
+func IsLifecycleEvent(eventName string) bool {
+	return eventName == StateChanged.Name || eventName == Crashed.Name
+}
+
 // BuildRecord turns the stdout record into its OTLP form. Attributes carry
 // everything machine-readable, so the body stays the display string.
 //
