@@ -570,6 +570,8 @@ func emitAdditionalEgressExtprocFilter() string {
     message_timeout: 2s
     request_attributes:
     - filter_state['dev.ate.actor.identity']
+    - filter_state['dev.ate.actor.uid']
+    - filter_state['dev.ate.actor.template']
     processing_mode:
       request_header_mode: SEND
       response_header_mode: SKIP

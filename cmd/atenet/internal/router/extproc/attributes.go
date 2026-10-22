@@ -50,6 +50,24 @@ const (
 	// evaluates to read ActorIdentityFilterStateKey back out.
 	ActorIdentityFilterStateAttribute = "filter_state['" + ActorIdentityFilterStateKey + "']"
 
+	// ActorUIDFilterStateKey holds the verified actor UID, returned on the
+	// CONNECT leg after the sidecar checks the peer certificate's
+	// ActorIdentity extension (when present) and the control plane's Actor
+	// record, and shared with the inner legs so additional ext_proc filters
+	// can key on an immutable actor identifier.
+	ActorUIDFilterStateKey = "dev.ate.actor.uid"
+	// ActorUIDFilterStateAttribute is the CEL expression ext_proc evaluates to
+	// read ActorUIDFilterStateKey back out.
+	ActorUIDFilterStateAttribute = "filter_state['" + ActorUIDFilterStateKey + "']"
+
+	// ActorTemplateFilterStateKey holds the actor's template name (best-effort,
+	// read from the Actor record during CONNECT authentication) and shared
+	// with the inner legs.
+	ActorTemplateFilterStateKey = "dev.ate.actor.template"
+	// ActorTemplateFilterStateAttribute is the CEL expression ext_proc
+	// evaluates to read ActorTemplateFilterStateKey back out.
+	ActorTemplateFilterStateAttribute = "filter_state['" + ActorTemplateFilterStateKey + "']"
+
 	// EgressMetadataNamespace is the dynamic-metadata namespace the CONNECT
 	// leg answers in. Envoy only keeps it when the outer ext_proc filter lists
 	// it under metadata_options.receiving_namespaces; the manifest tests check.
@@ -58,6 +76,14 @@ const (
 	// actor dialed, set on every allowed CONNECT. The outer chain copies it
 	// into UpstreamDynamicPortFilterStateKey for the passthrough chain.
 	EgressDialedPortKey = "dialed_port"
+	// EgressActorUIDKey, under EgressMetadataNamespace, is the verified actor
+	// UID returned on every allowed CONNECT and copied into
+	// ActorUIDFilterStateKey for the inner listener.
+	EgressActorUIDKey = "actor_uid"
+	// EgressActorTemplateKey, under EgressMetadataNamespace, is the actor's
+	// template name returned on an allowed CONNECT when known and copied into
+	// ActorTemplateFilterStateKey for the inner listener.
+	EgressActorTemplateKey = "actor_template"
 	// EgressPolicyMetadataNamespace holds the SNI rules returned on CONNECT, as
 	// JSON under EgressPolicyJSONKey: {"rules": [{"pattern": ..., "mode": ...}]},
 	// most specific first.
@@ -128,6 +154,14 @@ const FilterChainNameAttribute = "xds.filter_chain_name"
 // EgressDialedPortFormat is the set_filter_state format string that reads
 // EgressDialedPortKey back out.
 const EgressDialedPortFormat = "%DYNAMIC_METADATA(" + EgressMetadataNamespace + ":" + EgressDialedPortKey + ")%"
+
+// EgressActorUIDFormat and EgressActorTemplateFormat are the set_filter_state
+// format strings that read EgressActorUIDKey and EgressActorTemplateKey back
+// out into ActorUIDFilterStateKey and ActorTemplateFilterStateKey.
+const (
+	EgressActorUIDFormat      = "%DYNAMIC_METADATA(" + EgressMetadataNamespace + ":" + EgressActorUIDKey + ")%"
+	EgressActorTemplateFormat = "%DYNAMIC_METADATA(" + EgressMetadataNamespace + ":" + EgressActorTemplateKey + ")%"
+)
 
 // UpstreamDynamicPortFilterStateKey is Envoy's filter-state key for the port a
 // dynamic forward proxy dials, read before it falls back to its configured

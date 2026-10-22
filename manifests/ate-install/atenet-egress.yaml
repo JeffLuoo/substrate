@@ -257,6 +257,26 @@ data:
                       text_format_source:
                         inline_string: "%DYNAMIC_METADATA(dev.ate.egress:dialed_port)%"
                       omit_empty_values: true
+                  # The verified actor UID and template name from the CONNECT
+                  # leg's ateapi lookup, shared with the inner listener so logs
+                  # and additional ext_proc filters can attribute traffic to an
+                  # immutable actor UID and template without a second lookup.
+                  - object_key: dev.ate.actor.uid
+                    factory_key: envoy.hashable_string
+                    skip_if_empty: true
+                    shared_with_upstream: ONCE
+                    format_string:
+                      text_format_source:
+                        inline_string: "%DYNAMIC_METADATA(dev.ate.egress:actor_uid)%"
+                      omit_empty_values: true
+                  - object_key: dev.ate.actor.template
+                    factory_key: envoy.hashable_string
+                    skip_if_empty: true
+                    shared_with_upstream: ONCE
+                    format_string:
+                      text_format_source:
+                        inline_string: "%DYNAMIC_METADATA(dev.ate.egress:actor_template)%"
+                      omit_empty_values: true
                   # Workaround for dynamic module inability to store filter state that is shared with the upstream.
                   # TODO(yanavlasov): Remove after Envoy v1.40 is released.
                   - object_key: dev.ate.policy.egress.hash
@@ -335,6 +355,8 @@ data:
                 leg: clienthello
                 time: "%START_TIME%"
                 actor: "%FILTER_STATE(dev.ate.actor.identity:PLAIN)%"
+                actor_uid: "%FILTER_STATE(dev.ate.actor.uid:PLAIN)%"
+                actor_template: "%FILTER_STATE(dev.ate.actor.template:PLAIN)%"
                 sni: "%REQUESTED_SERVER_NAME%"
                 chain: "%FILTER_STATE(dev.ate.egress.filter_chain:PLAIN)%"
                 destination: "%FILTER_STATE(dev.ate.connect.authority:PLAIN)%"
@@ -439,6 +461,8 @@ data:
                       leg: mitm
                       time: "%START_TIME%"
                       actor: "%FILTER_STATE(dev.ate.actor.identity:PLAIN)%"
+                      actor_uid: "%FILTER_STATE(dev.ate.actor.uid:PLAIN)%"
+                      actor_template: "%FILTER_STATE(dev.ate.actor.template:PLAIN)%"
                       sni: "%REQUESTED_SERVER_NAME%"
                       authority: "%REQ(:AUTHORITY)%"
                       method: "%REQ(:METHOD)%"
@@ -698,6 +722,8 @@ data:
                       leg: cleartext
                       time: "%START_TIME%"
                       actor: "%FILTER_STATE(dev.ate.actor.identity:PLAIN)%"
+                      actor_uid: "%FILTER_STATE(dev.ate.actor.uid:PLAIN)%"
+                      actor_template: "%FILTER_STATE(dev.ate.actor.template:PLAIN)%"
                       authority: "%REQ(:AUTHORITY)%"
                       method: "%REQ(:METHOD)%"
                       path: "%REQ(X-ENVOY-ORIGINAL-PATH?:PATH)%"
@@ -853,6 +879,8 @@ data:
                       leg: passthrough
                       time: "%START_TIME%"
                       actor: "%FILTER_STATE(dev.ate.actor.identity:PLAIN)%"
+                      actor_uid: "%FILTER_STATE(dev.ate.actor.uid:PLAIN)%"
+                      actor_template: "%FILTER_STATE(dev.ate.actor.template:PLAIN)%"
                       # The name the rule matched and the gateway dialed.
                       sni: "%REQUESTED_SERVER_NAME%"
                       # What the actor dialed; upstream is where the connection went.

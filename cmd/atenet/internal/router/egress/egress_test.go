@@ -45,6 +45,7 @@ import (
 	"go.ate.dev/substrate/cmd/atenet/internal/router/extproc"
 	"go.ate.dev/substrate/internal/egresspolicy"
 	"go.ate.dev/substrate/internal/resources"
+	"go.ate.dev/substrate/internal/substratex509"
 	"go.ate.dev/substrate/pkg/proto/ateapipb"
 )
 
@@ -833,4 +834,58 @@ func TestParseXFCCChainIncludesIntermediates(t *testing.T) {
 	if !chain[0].Equal(leaf) {
 		t.Error("parseXFCCChain() did not return the leaf first")
 	}
+}
+
+func TestHandleConnectEmitsActorUIDAndTemplateMetadataAndVerifiesCertExtension(t *testing.T) {
+	ca := newTestCA(t, "actor-identity-ca")
+	spiffeURI := "spiffe://substrate-actor.local/worker-for-actor/" + testEgressAtespace + "/" + testEgressActor
+
+	withIdentityExt := func(atespace, name, uid string) actorCertOptions {
+		return actorCertOptions{
+			mutate: func(c *x509.Certificate) {
+				if err := substratex509.AddActorIdentityToCertificate(&substratex509.ActorIdentity{
+					Atespace:  atespace,
+					ActorName: name,
+					ActorUid:  uid,
+				}, c); err != nil {
+					t.Fatalf("AddActorIdentityToCertificate: %v", err)
+				}
+			},
+		}
+	}
+
+	t.Run("matching cert extension emits actor_uid and actor_template", func(t *testing.T) {
+		actor := runningActor()
+		actor.ActorTemplate = &ateapipb.ObjectRef{Atespace: testEgressAtespace, Name: "tmpl-agent"}
+		leaf := ca.issueActorCert(t, spiffeURI, withIdentityExt(testEgressAtespace, testEgressActor, testEgressActorUID))
+		h := egressHandler(ca.roots(), actor, nil)
+
+		res, err := h.HandleRequestHeaders(context.Background(), egressMetadata(xfccHeader(leaf)))
+		if err != nil {
+			t.Fatalf("HandleRequestHeaders() error = %v, want nil", err)
+		}
+		ns := res.DynamicMetadata.GetFields()[extproc.EgressMetadataNamespace].GetStructValue().GetFields()
+		if got := ns[extproc.EgressActorUIDKey].GetStringValue(); got != testEgressActorUID {
+			t.Errorf("%s = %q, want %q", extproc.EgressActorUIDKey, got, testEgressActorUID)
+		}
+		if got := ns[extproc.EgressActorTemplateKey].GetStringValue(); got != "tmpl-agent" {
+			t.Errorf("%s = %q, want %q", extproc.EgressActorTemplateKey, got, "tmpl-agent")
+		}
+	})
+
+	t.Run("mismatched cert extension actor_uid is denied", func(t *testing.T) {
+		leaf := ca.issueActorCert(t, spiffeURI, withIdentityExt(testEgressAtespace, testEgressActor, "stale-uid"))
+		h := egressHandler(ca.roots(), runningActor(), nil)
+
+		_, err := h.HandleRequestHeaders(context.Background(), egressMetadata(xfccHeader(leaf)))
+		wantStatus(t, err, envoy_type.StatusCode_Forbidden)
+	})
+
+	t.Run("mismatched cert extension actor_name vs SPIFFE URI is denied", func(t *testing.T) {
+		leaf := ca.issueActorCert(t, spiffeURI, withIdentityExt(testEgressAtespace, "other-actor", testEgressActorUID))
+		h := egressHandler(ca.roots(), runningActor(), nil)
+
+		_, err := h.HandleRequestHeaders(context.Background(), egressMetadata(xfccHeader(leaf)))
+		wantStatus(t, err, envoy_type.StatusCode_Forbidden)
+	})
 }

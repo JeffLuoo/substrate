@@ -737,6 +737,8 @@ func TestEgressManifestsConnectLegHandsTheSNIRulesHashToTheInnerListener(t *test
 		extproc.ActorIdentityFilterStateKey,
 		extproc.ConnectAuthorityFilterStateKey,
 		extproc.UpstreamDynamicPortFilterStateKey,
+		extproc.ActorUIDFilterStateKey,
+		extproc.ActorTemplateFilterStateKey,
 		extproc.EgressPolicyHashFilterStateKey,
 	}
 	if !slices.Equal(gotKeys, wantKeys) {
@@ -748,11 +750,25 @@ func TestEgressManifestsConnectLegHandsTheSNIRulesHashToTheInnerListener(t *test
 	for _, key := range []string{
 		extproc.ActorIdentityFilterStateKey,
 		extproc.ConnectAuthorityFilterStateKey,
+		extproc.ActorUIDFilterStateKey,
+		extproc.ActorTemplateFilterStateKey,
 		extproc.EgressPolicyHashFilterStateKey,
 	} {
 		// Make sure factory creates hashable filter state objects, so it impacts pool selection.
 		if got := str(actionsByKey[key], "factory_key"); got != "envoy.hashable_string" {
 			t.Errorf("%s uses factory %q, want envoy.hashable_string", key, got)
+		}
+	}
+	for key, wantFmt := range map[string]string{
+		extproc.ActorUIDFilterStateKey:      extproc.EgressActorUIDFormat,
+		extproc.ActorTemplateFilterStateKey: extproc.EgressActorTemplateFormat,
+	} {
+		act := actionsByKey[key]
+		if got := str(child(child(act, "format_string"), "text_format_source"), "inline_string"); got != wantFmt {
+			t.Errorf("%s is set from %q, want %q", key, got, wantFmt)
+		}
+		if skip, _ := act["skip_if_empty"].(bool); !skip {
+			t.Errorf("%s is not skip_if_empty", key)
 		}
 	}
 	if at < 0 {

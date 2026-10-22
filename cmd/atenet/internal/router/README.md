@@ -138,6 +138,8 @@ a request are declared once, in `extproc/attributes.go`.
 | `dev.ate.actor.atespace` | ingress | carries the atespace across CONNECT re-entry |
 | `dev.ate.connect.authority` | ingress, egress | carries the outer CONNECT authority across re-entry: target-port selection on ingress, the dialed port the request legs match `ports` against on egress |
 | `dev.ate.actor.identity` | egress | carries the authenticated actor identity to the policy ext_proc, the logs and additional ext_proc services |
+| `dev.ate.actor.uid` | egress | carries the verified actor UID from the CONNECT leg's `ateapi` lookup and certificate extension check to the logs and additional ext_proc services |
+| `dev.ate.actor.template` | egress | carries the actor's template name (best-effort, from the CONNECT leg's `ateapi` lookup) to the logs and additional ext_proc services |
 | `dev.ate.egress:dial` | egress | dynamic metadata: a request leg's answer, `name` or `address`, which picks the route |
 | `dev.ate.extproc.direction` | egress | selects the egress handler for dataplanes without Envoy filter chains |
 
