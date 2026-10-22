@@ -95,7 +95,7 @@ func (w *ActorWorkflow) DeleteActor(ctx context.Context, actorRef resources.Acto
 			slog.Any("volumesDetachedErr", volumesDetachedErr))
 	}
 
-	if err := w.ensureVolumesDeleted(ctx, actor); err != nil {
+	if err := w.ensureVolumesDeleted(ctx, actor, actorTemplate); err != nil {
 		errs = append(errs, fmt.Errorf("while deleting volumes: %w", err))
 	}
 
@@ -363,7 +363,7 @@ func (w *ActorWorkflow) ensureMarkedDeleting(ctx context.Context, actorRef resou
 
 // ensureVolumesDeleted removes the actor's external volumes. Volume deletion
 // is idempotent, so a re-entered workflow can safely run it again. It assumes a no-op success if volume is not found
-func (w *ActorWorkflow) ensureVolumesDeleted(ctx context.Context, actor *ateapipb.Actor) (err error) {
+func (w *ActorWorkflow) ensureVolumesDeleted(ctx context.Context, actor *ateapipb.Actor, actorTemplate *ateapipb.ActorTemplate) (err error) {
 	ctx, done := stepSpan(ctx, "DeleteVolumes")
 	defer func() { err = done(err) }()
 
@@ -377,7 +377,7 @@ func (w *ActorWorkflow) ensureVolumesDeleted(ctx context.Context, actor *ateapip
 	// disabling the gate while in use would be an orphaned volume
 	// attachment, we are NOT checking the ExternalVolumes gate in the
 	// delete/suspend path.
-	if err := deleteActorVolumes(ctx, w.pluginRegistry, actor.GetMetadata().GetUid(), actor.GetStatus().GetExternalVolumes()); err != nil {
+	if err := deleteActorVolumesForActor(ctx, w.pluginRegistry, actor, actorTemplate, actor.GetStatus().GetExternalVolumes()); err != nil {
 		return apierror.Internal("while deleting actor volumes: %v", err)
 	}
 	return nil

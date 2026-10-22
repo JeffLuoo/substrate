@@ -142,16 +142,50 @@ var (
 			string(ateattr.StatsCPUTimeKey),
 		},
 	}
+
+	VolumeProvisioned = Event{
+		Name:     "ate.actor.volume_provisioned",
+		Body:     "Actor volume provisioned",
+		Severity: log.SeverityInfo,
+		Keys: append(append([]string{}, identityKeys...),
+			string(ateattr.VolumeNameKey),
+			string(ateattr.VolumeCSINameKey),
+			string(ateattr.VolumeStorageIDKey),
+			string(ateattr.VolumeStorageClassKey),
+			string(ateattr.VolumeDriverKey),
+			string(ateattr.VolumeCapacityBytesKey)),
+	}
+
+	VolumeDeleted = Event{
+		Name:     "ate.actor.volume_deleted",
+		Body:     "Actor volume deleted",
+		Severity: log.SeverityInfo,
+		Keys: append(append([]string{}, identityKeys...),
+			string(ateattr.VolumeNameKey),
+			string(ateattr.VolumeCSINameKey),
+			string(ateattr.VolumeStorageIDKey),
+			string(ateattr.VolumeDriverKey)),
+		// Absent when the ActorTemplate was deleted before the actor and its
+		// volume spec can no longer be resolved.
+		Conditional: []string{
+			string(ateattr.VolumeStorageClassKey),
+			string(ateattr.VolumeCapacityBytesKey),
+		},
+	}
 )
 
 // events is the whole vocabulary, which the registry test walks. An event left
 // out of it is never checked against docs/metrics/registry/events.yaml.
-var events = []Event{StateChanged, Crashed, UsageSampled}
+var events = []Event{StateChanged, Crashed, UsageSampled, VolumeProvisioned, VolumeDeleted}
 
 // IsLifecycleEvent reports whether eventName is an actor lifecycle event
-// (ate.actor.state_changed or ate.actor.crashed).
+// (ate.actor.state_changed, ate.actor.crashed, ate.actor.volume_provisioned,
+// or ate.actor.volume_deleted).
 func IsLifecycleEvent(eventName string) bool {
-	return eventName == StateChanged.Name || eventName == Crashed.Name
+	return eventName == StateChanged.Name ||
+		eventName == Crashed.Name ||
+		eventName == VolumeProvisioned.Name ||
+		eventName == VolumeDeleted.Name
 }
 
 // BuildRecord turns the stdout record into its OTLP form. Attributes carry

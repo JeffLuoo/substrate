@@ -18,6 +18,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
 	"testing"
 
@@ -27,6 +28,7 @@ import (
 	"google.golang.org/protobuf/testing/protocmp"
 
 	"go.ate.dev/substrate/internal/apierror"
+	"go.ate.dev/substrate/internal/ateattr"
 	"go.ate.dev/substrate/internal/volume"
 	"go.ate.dev/substrate/pkg/proto/ateapipb"
 	storagev1 "k8s.io/api/storage/v1"
@@ -684,5 +686,163 @@ func TestDetachActorVolumes(t *testing.T) {
 				t.Errorf("detachCalls mismatch (-want +got):\n%s", diff)
 			}
 		})
+	}
+}
+
+type volumeLogCaptureHandler struct {
+	records []slog.Record
+}
+
+func (h *volumeLogCaptureHandler) Enabled(context.Context, slog.Level) bool { return true }
+func (h *volumeLogCaptureHandler) Handle(_ context.Context, r slog.Record) error {
+	if strings.HasPrefix(r.Message, "Actor volume ") {
+		h.records = append(h.records, r.Clone())
+	}
+	return nil
+}
+func (h *volumeLogCaptureHandler) WithAttrs([]slog.Attr) slog.Handler { return h }
+func (h *volumeLogCaptureHandler) WithGroup(string) slog.Handler      { return h }
+
+func recordAttrMap(r slog.Record) map[string]string {
+	m := make(map[string]string)
+	r.Attrs(func(a slog.Attr) bool {
+		m[a.Key] = a.Value.String()
+		return true
+	})
+	return m
+}
+
+func TestActorVolumeEventsAndLabels(t *testing.T) {
+	ctx := context.Background()
+	handler := &volumeLogCaptureHandler{}
+	prev := slog.Default()
+	slog.SetDefault(slog.New(handler))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+
+	actor := &ateapipb.Actor{
+		Metadata: &ateapipb.ResourceMetadata{
+			Atespace: "Team.Alpha",
+			Name:     "coder-1",
+			Uid:      "8f2a1c4e6b0d47f1",
+		},
+		ActorTemplate: &ateapipb.ObjectRef{
+			Atespace: "Team.Alpha",
+			Name:     "coder-template",
+		},
+	}
+	tmpl := &ateapipb.ActorTemplate{
+		Metadata: &ateapipb.ResourceMetadata{
+			Atespace: "Team.Alpha",
+			Name:     "coder-template",
+		},
+		Volumes: []*ateapipb.Volume{
+			{
+				Name: "workspace",
+				ExternalVolumeTemplate: &ateapipb.ExternalVolumeTemplate{
+					StorageClassName: "standard-rwo",
+					Capacity:         "10Gi",
+				},
+			},
+		},
+	}
+	origParams := map[string]string{
+		"type":   "pd-balanced",
+		"labels": "env=prod,ate_atespace=stale",
+	}
+	scLister := &fakeStorageClassLister{
+		storageClasses: map[string]*storagev1.StorageClass{
+			"standard-rwo": {
+				ObjectMeta:  metav1.ObjectMeta{Name: "standard-rwo"},
+				Provisioner: "pd.csi.storage.gke.io",
+				Parameters:  origParams,
+			},
+		},
+	}
+	mockPlugin := volume.NewMockVolumePlugin()
+	registry := &mockPluginRegistry{
+		plugins: map[string]volume.VolumePluginControlPlane{
+			"pd.csi.storage.gke.io": mockPlugin,
+		},
+	}
+
+	vols, err := createActorVolumesForActor(ctx, registry, scLister, actor, tmpl, []*ateapipb.ExternalVolume{
+		{Name: "workspace", VolumeType: "pd.csi.storage.gke.io"},
+	}, true)
+	if err != nil {
+		t.Fatalf("createActorVolumesForActor() error = %v", err)
+	}
+	if len(vols) != 1 {
+		t.Fatalf("len(vols) = %d, want 1", len(vols))
+	}
+	// Verify StorageClass informer map was not mutated in place.
+	if got := origParams["labels"]; got != "env=prod,ate_atespace=stale" {
+		t.Errorf("StorageClass Parameters[\"labels\"] mutated to %q", got)
+	}
+	// Verify merged labels passed to CreateVolume (MockVolumePlugin echoes Parameters into VolumeContext).
+	wantLabels := "env=prod,ate_atespace=team_alpha,ate_actor_uid=8f2a1c4e6b0d47f1"
+	if got := vols[0].GetVolumeContext()["labels"]; got != wantLabels {
+		t.Errorf("VolumeContext[\"labels\"] = %q, want %q", got, wantLabels)
+	}
+
+	if len(handler.records) != 1 {
+		t.Fatalf("captured %d log records after create, want 1", len(handler.records))
+	}
+	provRec := handler.records[0]
+	if provRec.Message != "Actor volume provisioned" {
+		t.Errorf("provisioned message = %q, want %q", provRec.Message, "Actor volume provisioned")
+	}
+	wantProvAttrs := map[string]string{
+		string(ateattr.AtespaceKey):            "Team.Alpha",
+		string(ateattr.ActorNameKey):           "coder-1",
+		string(ateattr.ActorUIDKey):            "8f2a1c4e6b0d47f1",
+		string(ateattr.TemplateAtespaceKey):    "Team.Alpha",
+		string(ateattr.TemplateNameKey):        "coder-template",
+		string(ateattr.VolumeNameKey):          "workspace",
+		string(ateattr.VolumeCSINameKey):       "substrate-8f2a1c4e6b0d47f1-workspace",
+		string(ateattr.VolumeStorageIDKey):     "mock-vol-substrate-8f2a1c4e6b0d47f1-workspace",
+		string(ateattr.VolumeStorageClassKey):  "standard-rwo",
+		string(ateattr.VolumeDriverKey):        "pd.csi.storage.gke.io",
+		string(ateattr.VolumeCapacityBytesKey): "10737418240",
+	}
+	if diff := cmp.Diff(wantProvAttrs, recordAttrMap(provRec)); diff != "" {
+		t.Errorf("provisioned event attrs mismatch (-want +got):\n%s", diff)
+	}
+
+	delPlugin := &trackingVolumePlugin{}
+	delRegistry := &mockPluginRegistry{
+		plugins: map[string]volume.VolumePluginControlPlane{
+			"pd.csi.storage.gke.io": delPlugin,
+		},
+	}
+	if err := deleteActorVolumesForActor(ctx, delRegistry, actor, tmpl, vols); err != nil {
+		t.Fatalf("deleteActorVolumesForActor() error = %v", err)
+	}
+	if len(handler.records) != 2 {
+		t.Fatalf("captured %d log records after delete, want 2", len(handler.records))
+	}
+	delRec := handler.records[1]
+	if delRec.Message != "Actor volume deleted" {
+		t.Errorf("deleted message = %q, want %q", delRec.Message, "Actor volume deleted")
+	}
+	if diff := cmp.Diff(wantProvAttrs, recordAttrMap(delRec)); diff != "" {
+		t.Errorf("deleted event attrs mismatch (-want +got):\n%s", diff)
+	}
+}
+
+func TestSanitizeAndMergeActorVolumeLabels(t *testing.T) {
+	t.Parallel()
+
+	longVal := strings.Repeat("a", 80)
+	if got := sanitizeGCELabelValue(longVal); len(got) != 63 {
+		t.Errorf("len(sanitizeGCELabelValue(80 chars)) = %d, want 63", len(got))
+	}
+	if got := sanitizeGCELabelValue("My.Atespace/With:Chars"); got != "my_atespace_with_chars" {
+		t.Errorf("sanitizeGCELabelValue() = %q, want %q", got, "my_atespace_with_chars")
+	}
+	if got := mergeActorVolumeLabels("", "default", "uid-1"); got != "ate_atespace=default,ate_actor_uid=uid-1" {
+		t.Errorf("mergeActorVolumeLabels(empty) = %q", got)
+	}
+	if got := mergeActorVolumeLabels("k1=v1, k2=v2", "default", "uid-1"); got != "k1=v1,k2=v2,ate_atespace=default,ate_actor_uid=uid-1" {
+		t.Errorf("mergeActorVolumeLabels(existing) = %q", got)
 	}
 }

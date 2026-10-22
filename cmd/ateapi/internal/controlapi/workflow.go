@@ -149,6 +149,7 @@ type ActorWorkflow struct {
 	egressGatewayAddress string
 	pluginRegistry       VolumePluginRegistry
 	objectStorePlugin    objectstorev1.ControlProviderClient
+	labelActorVolumes    bool
 }
 
 // NewActorWorkflow creates a new ActorWorkflow. instruments may be nil.

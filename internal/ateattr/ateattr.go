@@ -195,6 +195,18 @@ const (
 // left. Logs only: it is only ever recorded beside actor identity.
 const SandboxOOMKillsKey = attribute.Key("ate.sandbox.oom_kills")
 
+// Keys of the actor external volume lifecycle events (ate.actor.volume_provisioned
+// and ate.actor.volume_deleted). Logs only: volume names, CSI request names, and
+// driver-returned storage volume IDs are per-actor or unbounded.
+const (
+	VolumeNameKey          = attribute.Key("ate.volume.name")
+	VolumeCSINameKey       = attribute.Key("ate.volume.csi_name")
+	VolumeStorageIDKey     = attribute.Key("ate.volume.storage_volume_id")
+	VolumeStorageClassKey  = attribute.Key("ate.volume.storage_class")
+	VolumeDriverKey        = attribute.Key("ate.volume.driver")
+	VolumeCapacityBytesKey = attribute.Key("ate.volume.capacity_bytes")
+)
+
 // Values for StatsKindKey. An initial or final sample brackets an activation; a
 // periodic one is the timer's.
 const (

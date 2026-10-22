@@ -19,13 +19,19 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"maps"
+	"strings"
 
+	"go.ate.dev/substrate/internal/actorevent"
 	"go.ate.dev/substrate/internal/apierror"
+	"go.ate.dev/substrate/internal/ateattr"
+	"go.ate.dev/substrate/internal/resources"
 	"go.ate.dev/substrate/internal/volume"
 	"go.ate.dev/substrate/pkg/proto/ateapipb"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/resource"
 	storagev1listers "k8s.io/client-go/listers/storage/v1"
 )
 
@@ -60,6 +66,13 @@ func initialExternalVolumes(ctx context.Context, scLister storagev1listers.Stora
 // It returns the list of external volumes (with storage IDs), or an error if any creation fails.
 // Any volumes processed before or during a failure are returned alongside the error so they can be persisted on the actor.
 func createActorVolumes(ctx context.Context, registry VolumePluginRegistry, scLister storagev1listers.StorageClassLister, actorUID string, template *ateapipb.ActorTemplate, volumesToCreate []*ateapipb.ExternalVolume) (resultVolumes []*ateapipb.ExternalVolume, err error) {
+	return createActorVolumesForActor(ctx, registry, scLister, &ateapipb.Actor{
+		Metadata: &ateapipb.ResourceMetadata{Uid: actorUID},
+	}, template, volumesToCreate, false)
+}
+
+func createActorVolumesForActor(ctx context.Context, registry VolumePluginRegistry, scLister storagev1listers.StorageClassLister, actor *ateapipb.Actor, template *ateapipb.ActorTemplate, volumesToCreate []*ateapipb.ExternalVolume, labelActorVolumes bool) (resultVolumes []*ateapipb.ExternalVolume, err error) {
+	actorUID := actor.GetMetadata().GetUid()
 	resultVolumes = make([]*ateapipb.ExternalVolume, 0, len(volumesToCreate))
 
 	var currentIdx int
@@ -111,10 +124,16 @@ func createActorVolumes(ctx context.Context, registry VolumePluginRegistry, scLi
 			return resultVolumes, apierror.FailedPrecondition("failed to get volume plugin for driver %q (StorageClass %q): %v", sc.Provisioner, scName, err)
 		}
 
+		params := sc.Parameters
+		if labelActorVolumes {
+			params = parametersWithActorVolumeLabels(sc.Parameters, actor.GetMetadata().GetAtespace(), actorUID)
+		}
+
+		capacityStr := specVol.GetExternalVolumeTemplate().GetCapacity()
 		resp, volErr := plugin.CreateVolume(ctx, volume.CreateVolumeRequest{
 			Name:       actVolID,
-			Capacity:   specVol.GetExternalVolumeTemplate().GetCapacity(),
-			Parameters: sc.Parameters,
+			Capacity:   capacityStr,
+			Parameters: params,
 		})
 		if volErr != nil {
 			return resultVolumes, apierror.Internal("failed to create volume %q: %v", specVol.GetName(), volErr)
@@ -124,6 +143,8 @@ func createActorVolumes(ctx context.Context, registry VolumePluginRegistry, scLi
 			// An empty ID would read as not yet provisioned and be created again.
 			return resultVolumes, apierror.Internal("volume plugin returned no ID for volume %q", specVol.GetName())
 		}
+
+		logActorVolumeProvisioned(ctx, actor, template, volName, actVolID, resp.VolumeID, scName, sc.Provisioner, capacityStr)
 
 		resultVolumes = append(resultVolumes, &ateapipb.ExternalVolume{
 			Name:            volName,
@@ -137,17 +158,25 @@ func createActorVolumes(ctx context.Context, registry VolumePluginRegistry, scLi
 
 // deleteActorVolumes deletes all external volumes in the list.
 func deleteActorVolumes(ctx context.Context, registry VolumePluginRegistry, actorUID string, volumes []*ateapipb.ExternalVolume) error {
+	return deleteActorVolumesForActor(ctx, registry, &ateapipb.Actor{
+		Metadata: &ateapipb.ResourceMetadata{Uid: actorUID},
+	}, nil, volumes)
+}
+
+func deleteActorVolumesForActor(ctx context.Context, registry VolumePluginRegistry, actor *ateapipb.Actor, template *ateapipb.ActorTemplate, volumes []*ateapipb.ExternalVolume) error {
+	actorUID := actor.GetMetadata().GetUid()
 	if actorUID == "" {
 		return errors.New("actorUID is required")
 	}
 	var errs []error
 	for _, vol := range volumes {
+		csiName := actorVolumeID(actorUID, vol.GetName())
 		volID := vol.GetStorageVolumeId()
 		if volID == "" {
 			// If the volume hasn't been successfully created yet, it's possible
 			// that it doesn't have a storage volume ID. In that case, fallback
 			// to the original requested volID.
-			volID = actorVolumeID(actorUID, vol.GetName())
+			volID = csiName
 		}
 		// TODO: Standardize volume plugin lookup and error handling across control plane
 		// and worker plane (e.g. via a shared helper).
@@ -162,9 +191,134 @@ func deleteActorVolumes(ctx context.Context, registry VolumePluginRegistry, acto
 				continue
 			}
 			errs = append(errs, fmt.Errorf("failed to delete volume %q: %w", volID, err))
+			continue
 		}
+		logActorVolumeDeleted(ctx, actor, template, vol.GetName(), csiName, volID, vol.GetVolumeType())
 	}
 	return errors.Join(errs...)
+}
+
+const gceLabelMaxLen = 63
+
+// sanitizeGCELabelValue converts val into a valid GCE resource label value:
+// lowercase ASCII letters, digits, underscores, and hyphens, truncated to 63
+// characters.
+func sanitizeGCELabelValue(val string) string {
+	val = strings.ToLower(val)
+	var b strings.Builder
+	b.Grow(min(len(val), gceLabelMaxLen))
+	for _, r := range val {
+		if b.Len() >= gceLabelMaxLen {
+			break
+		}
+		switch {
+		case r >= 'a' && r <= 'z', r >= '0' && r <= '9', r == '_', r == '-':
+			b.WriteRune(r)
+		default:
+			b.WriteByte('_')
+		}
+	}
+	return b.String()
+}
+
+// mergeActorVolumeLabels merges sanitized ate_atespace and ate_actor_uid label
+// pairs onto an existing comma-separated CSI StorageClass "labels" parameter.
+func mergeActorVolumeLabels(existing, atespace, actorUID string) string {
+	var parts []string
+	for _, seg := range strings.Split(existing, ",") {
+		seg = strings.TrimSpace(seg)
+		if seg == "" {
+			continue
+		}
+		key, _, _ := strings.Cut(seg, "=")
+		key = strings.TrimSpace(key)
+		if key == "ate_atespace" || key == "ate_actor_uid" {
+			continue
+		}
+		parts = append(parts, seg)
+	}
+	if s := sanitizeGCELabelValue(atespace); s != "" {
+		parts = append(parts, "ate_atespace="+s)
+	}
+	if s := sanitizeGCELabelValue(actorUID); s != "" {
+		parts = append(parts, "ate_actor_uid="+s)
+	}
+	return strings.Join(parts, ",")
+}
+
+// parametersWithActorVolumeLabels returns a shallow copy of scParams with
+// sanitized ate_atespace and ate_actor_uid merged into params["labels"].
+// Cloning prevents mutating the shared StorageClass informer cache entry.
+func parametersWithActorVolumeLabels(scParams map[string]string, atespace, actorUID string) map[string]string {
+	merged := mergeActorVolumeLabels(scParams["labels"], atespace, actorUID)
+	if merged == "" {
+		return scParams
+	}
+	out := maps.Clone(scParams)
+	if out == nil {
+		out = make(map[string]string, 1)
+	}
+	out["labels"] = merged
+	return out
+}
+
+func actorAttributionForVolume(actor *ateapipb.Actor, template *ateapipb.ActorTemplate) resources.ActorAttribution {
+	attr := resources.ActorAttributionFromActor(actor)
+	if attr.TemplateAtespace == "" && template != nil {
+		attr.TemplateAtespace = template.GetMetadata().GetAtespace()
+	}
+	if attr.TemplateName == "" && template != nil {
+		attr.TemplateName = template.GetMetadata().GetName()
+	}
+	return attr
+}
+
+func parseVolumeCapacityBytes(capacity string) (int64, bool) {
+	if capacity == "" {
+		return 0, false
+	}
+	q, err := resource.ParseQuantity(capacity)
+	if err != nil {
+		return 0, false
+	}
+	return q.Value(), true
+}
+
+func logActorVolumeProvisioned(ctx context.Context, actor *ateapipb.Actor, template *ateapipb.ActorTemplate, volName, csiName, storageVolumeID, storageClass, driver, capacity string) {
+	capBytes, _ := parseVolumeCapacityBytes(capacity)
+	attrs := ateattr.ActorLogAttrs(actorAttributionForVolume(actor, template))
+	attrs = append(attrs,
+		slog.String(string(ateattr.VolumeNameKey), volName),
+		slog.String(string(ateattr.VolumeCSINameKey), csiName),
+		slog.String(string(ateattr.VolumeStorageIDKey), storageVolumeID),
+		slog.String(string(ateattr.VolumeStorageClassKey), storageClass),
+		slog.String(string(ateattr.VolumeDriverKey), driver),
+		slog.Int64(string(ateattr.VolumeCapacityBytesKey), capBytes),
+	)
+	actorevent.Log(ctx, actorevent.VolumeProvisioned, attrs)
+}
+
+func logActorVolumeDeleted(ctx context.Context, actor *ateapipb.Actor, template *ateapipb.ActorTemplate, volName, csiName, storageVolumeID, driver string) {
+	attrs := ateattr.ActorLogAttrs(actorAttributionForVolume(actor, template))
+	attrs = append(attrs,
+		slog.String(string(ateattr.VolumeNameKey), volName),
+		slog.String(string(ateattr.VolumeCSINameKey), csiName),
+		slog.String(string(ateattr.VolumeStorageIDKey), storageVolumeID),
+		slog.String(string(ateattr.VolumeDriverKey), driver),
+	)
+	for _, tVol := range template.GetVolumes() {
+		if tVol.GetName() == volName && tVol.GetExternalVolumeTemplate() != nil {
+			ext := tVol.GetExternalVolumeTemplate()
+			if scName := ext.GetStorageClassName(); scName != "" {
+				attrs = append(attrs, slog.String(string(ateattr.VolumeStorageClassKey), scName))
+			}
+			if capBytes, ok := parseVolumeCapacityBytes(ext.GetCapacity()); ok {
+				attrs = append(attrs, slog.Int64(string(ateattr.VolumeCapacityBytesKey), capBytes))
+			}
+			break
+		}
+	}
+	actorevent.Log(ctx, actorevent.VolumeDeleted, attrs)
 }
 
 // getMountedActorVolumes filters the actor's volumes and returns only those that are declared and mounted in the ActorTemplate.

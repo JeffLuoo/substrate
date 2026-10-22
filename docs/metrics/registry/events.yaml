@@ -224,3 +224,86 @@ groups:
       - ref: ate.stats.cpu.time
         requirement_level:
           conditionally_required: ate.stats.source is not unspecified.
+
+  - id: event.ate.actor.volume_provisioned
+    type: event
+    name: ate.actor.volume_provisioned
+    stability: development
+    brief: An external CSI volume of an actor was provisioned.
+    note: >
+      ateapi writes one record when CreateVolume succeeds for an actor's
+      external volume during resume. The volume exists and accrues storage cost
+      from this timestamp across both active and suspended time until
+      ate.actor.volume_deleted or actor deletion.
+    annotations:
+      substrate:
+        emitted_by: [ateapi]
+        code_anchor: cmd/ateapi/internal/controlapi/volumes.go
+        cuj: Which external volume was provisioned for this actor, and when?
+    attributes:
+      - ref: ate.atespace
+        requirement_level: required
+      - ref: ate.actor.name
+        requirement_level: required
+      - ref: ate.actor.uid
+        requirement_level: required
+      - ref: ate.template.atespace
+        requirement_level: required
+      - ref: ate.template.name
+        requirement_level: required
+      - ref: ate.volume.name
+        requirement_level: required
+      - ref: ate.volume.csi_name
+        requirement_level: required
+      - ref: ate.volume.storage_volume_id
+        requirement_level: required
+      - ref: ate.volume.storage_class
+        requirement_level: required
+      - ref: ate.volume.driver
+        requirement_level: required
+      - ref: ate.volume.capacity_bytes
+        requirement_level: required
+
+  - id: event.ate.actor.volume_deleted
+    type: event
+    name: ate.actor.volume_deleted
+    stability: development
+    brief: An external CSI volume of an actor was deleted.
+    note: >
+      ateapi writes one record when DeleteVolume succeeds for an actor's
+      external volume during actor deletion. Together with
+      ate.actor.volume_provisioned, this bounds the volume's billed lifetime.
+    annotations:
+      substrate:
+        emitted_by: [ateapi]
+        code_anchor: cmd/ateapi/internal/controlapi/volumes.go
+        cuj: When was an actor's external volume deleted?
+    attributes:
+      - ref: ate.atespace
+        requirement_level: required
+      - ref: ate.actor.name
+        requirement_level: required
+      - ref: ate.actor.uid
+        requirement_level: required
+      - ref: ate.template.atespace
+        requirement_level: required
+      - ref: ate.template.name
+        requirement_level: required
+      - ref: ate.volume.name
+        requirement_level: required
+      - ref: ate.volume.csi_name
+        requirement_level: required
+      - ref: ate.volume.storage_volume_id
+        requirement_level: required
+      - ref: ate.volume.driver
+        requirement_level: required
+      - ref: ate.volume.storage_class
+        requirement_level:
+          conditionally_required: >
+            When the ActorTemplate still exists at actor deletion time and names
+            a StorageClass for the volume.
+      - ref: ate.volume.capacity_bytes
+        requirement_level:
+          conditionally_required: >
+            When the ActorTemplate still exists at actor deletion time and
+            declares a valid capacity quantity for the volume.

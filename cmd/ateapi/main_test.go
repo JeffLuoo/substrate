@@ -383,3 +383,22 @@ func TestBuildLifecycleOTLPOptionsAndEnvFallback(t *testing.T) {
 		t.Errorf("ClientCredBundle = %q, want %q", opts.ClientCredBundle, "/custom/cred-bundle.pem")
 	}
 }
+
+func TestLoadFlagsFromEnvCSIVolumeActorLabels(t *testing.T) {
+	orig := *csiVolumeActorLabels
+	t.Cleanup(func() { *csiVolumeActorLabels = orig })
+	*csiVolumeActorLabels = false
+
+	t.Setenv("ATE_API_CSI_VOLUME_ACTOR_LABELS", "true")
+	if err := loadFlagsFromEnv(); err != nil {
+		t.Fatalf("loadFlagsFromEnv() error = %v", err)
+	}
+	if !*csiVolumeActorLabels {
+		t.Fatal("csiVolumeActorLabels = false, want true")
+	}
+
+	t.Setenv("ATE_API_CSI_VOLUME_ACTOR_LABELS", "not-a-bool")
+	if err := loadFlagsFromEnv(); err == nil || !strings.Contains(err.Error(), "ATE_API_CSI_VOLUME_ACTOR_LABELS must be a boolean") {
+		t.Fatalf("loadFlagsFromEnv() error = %v, want boolean validation error", err)
+	}
+}

@@ -650,6 +650,55 @@ groups:
           ate.actor.stats.cpu.time, thus one query serves both signals.
         examples: [1.5]
 
+  - id: registry.ate.volume
+    type: attribute_group
+    brief: The attributes of the external CSI volume lifecycle events of an actor.
+    attributes:
+      - id: ate.volume.name
+        stability: development
+        type: string
+        brief: The logical name of the volume in the ActorTemplate.
+        note: >
+          Logs only. It is only ever recorded beside actor identity, which no
+          metric may carry.
+        examples: [workspace-disk]
+      - id: ate.volume.csi_name
+        stability: development
+        type: string
+        brief: >
+          The CSI CreateVolumeRequest name (substrate-<actorUID>-<volumeName>).
+          For pd.csi.storage.gke.io this is also the GCE disk name.
+        note: >
+          Logs only. High cardinality (one value per actor volume). Never use on
+          a metric.
+        examples: [substrate-8f2a1c4e6b0d47f1-workspace-disk]
+      - id: ate.volume.storage_volume_id
+        stability: development
+        type: string
+        brief: The storage volume handle returned by the CSI driver.
+        note: >
+          Logs only. High cardinality (one value per provisioned volume). Never
+          use on a metric.
+        examples: [projects/my-proj/zones/us-central1-a/disks/substrate-8f2a1c4e6b0d47f1-workspace-disk]
+      - id: ate.volume.storage_class
+        stability: development
+        type: string
+        brief: The Kubernetes StorageClass name declared on the template volume.
+        note: Logs only.
+        examples: [standard-rwo]
+      - id: ate.volume.driver
+        stability: development
+        type: string
+        brief: The CSI driver (StorageClass provisioner) that manages the volume.
+        note: Logs only.
+        examples: [pd.csi.storage.gke.io]
+      - id: ate.volume.capacity_bytes
+        stability: development
+        type: int
+        brief: The requested capacity of the volume in bytes, parsed from the template quantity.
+        note: Logs only.
+        examples: [10737418240]
+
   - id: registry.ate.deviation
     type: attribute_group
     brief: >

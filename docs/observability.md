@@ -210,17 +210,19 @@ The actor still reports `RUNNING` after this record; nothing moves it to `CRASHE
 
 With `OTEL_LOGS_EXPORTER=otlp` these records go out as OTLP log events instead of stdout, so a collector reads them without knowing substrate's stdout envelope. Unset or `none`, which is what every environment but kind uses today, keeps them on stdout. `otlp,console` writes both, as kind does for debugging. `console` here is the component's own JSON log line, not the OTel SDK's console exporter format. The value is a comma-separated list: names are trimmed, lowercased, and counted once, and an unknown or empty item logs a warning and is skipped while the rest apply. `none` with an exporter, or a value that names no known exporter, logs a warning and keeps the default, `none`. ateapi emits the lifecycle events and the ateworkers the usage samples, on the same switch; the ateworkers export through [the ateworker relay](#the-ateworker-otlp-relay), which carries logs, traces, and metrics. atecontroller copies `OTEL_LOGS_EXPORTER` into each worker pod, so the kind ConfigMap sets the ateworkers to `otlp,console` too.
 
-Three `event.name` values, which is the OTLP LogRecord's own field rather than an attribute:
+Five `event.name` values, which is the OTLP LogRecord's own field rather than an attribute:
 
 | `event.name` | Body | Severity | Attributes |
 |---|---|---|---|
 | `ate.actor.state_changed` | `Actor state changed` | 9 | the five identity keys, `ate.actor.operation.name`, `ate.actor.state` |
 | `ate.actor.crashed` | `Actor crashed` | 17 | the same keys |
 | `ate.actor.usage_sampled` | `Actor usage sampled` | 9 | the five identity keys, `ate.workerpool.*`, `ate.sandbox.class`, `ate.stats.*`, `ate.actor.epoch` |
+| `ate.actor.volume_provisioned` | `Actor volume provisioned` | 9 | the five identity keys, `ate.volume.*` |
+| `ate.actor.volume_deleted` | `Actor volume deleted` | 9 | the five identity keys, `ate.volume.*` |
 
 `ate.actor.usage_sampled` is the ateworkers' record: one per actor per sampling interval, plus an `initial` record per activation and a `final` one when the ateworker tears it down, told apart by `ate.stats.kind`. Its timestamp is when the measurement was read. Its measurements are named after the `ate.actor.stats.*` instruments and share their units, so `ate.stats.cpu.time` is seconds. They are absent, not zero, while the actor is not measurable, which the record says with `ate.stats.source` unspecified. `ate.stats.cpu.time` restarts at zero with each `ate.actor.epoch`, the unix-nano time the activation began, so a lifetime figure is the sum over epochs of each epoch's highest value; `ate.stats.memory.usage` and `ate.stats.memory.working_set` are absolute, and `ate.stats.memory.peak` is as the source reports it. The same measurements ride `WorkloadStatsSample` on the stats RPCs, with the epoch beside them.
 
-A crash is its own name because an event name promises a set of attributes and a crash has a different severity and shape. There is no name per state: `ate.actor.state` already says which transition happened, so a consumer still selects on that one attribute and needs no map from a name to a state. All three names are in [`docs/metrics/registry/events.yaml`](metrics/registry/events.yaml), which `hack/verify-all.sh` checks.
+A crash is its own name because an event name promises a set of attributes and a crash has a different severity and shape. There is no name per state: `ate.actor.state` already says which transition happened, so a consumer still selects on that one attribute and needs no map from a name to a state. All five names are in [`docs/metrics/registry/events.yaml`](metrics/registry/events.yaml), which `hack/verify-all.sh` checks.
 
 The attributes are the same flat `ate.*` keys as the stdout record, so they arrive as real log attributes with no transform in front of them. Trace context is not among them: it goes on the record's own `TraceId` and `SpanId` fields, where the stdout record's top-level `trace_id`/`span_id` would be mapped to anyway. The instrumentation scope is `go.ate.dev/substrate/internal/actorevent` for every actor event. Select or drop a stream by `event.name`: the lifecycle events must never be sampled, the usage samples may be.
 
@@ -232,14 +234,14 @@ The attributes are the same flat `ate.*` keys as the stdout record, so they arri
 
 #### Direct mTLS export for lifecycle events
 
-`ateapi` also supports an opt-in, second OTLP/gRPC log exporter dedicated to actor lifecycle events (`ate.actor.state_changed` and `ate.actor.crashed`), so a downstream accounting service such as FinOps can receive authenticated lifecycle records directly from `ateapi` over mTLS without routing through the cluster's general OpenTelemetry Collector:
+`ateapi` also supports an opt-in, second OTLP/gRPC log exporter dedicated to actor lifecycle events (`ate.actor.state_changed`, `ate.actor.crashed`, `ate.actor.volume_provisioned`, and `ate.actor.volume_deleted`), so a downstream accounting service such as FinOps can receive authenticated lifecycle records directly from `ateapi` over mTLS without routing through the cluster's general OpenTelemetry Collector:
 
 * `--lifecycle-events-otlp-endpoint` / `ATE_API_LIFECYCLE_EVENTS_OTLP_ENDPOINT`: target OTLP/gRPC address (`host:port`, `host` defaulting to `:4317`, or `https://host[:port]`, e.g. `finops.ate-finops.svc:4317`). Empty (the default) disables the second exporter. Plaintext `http://` endpoints are rejected.
 * `--lifecycle-events-otlp-ca-file` / `ATE_API_LIFECYCLE_EVENTS_OTLP_CA_FILE`: PEM trust bundle used to verify the receiver's serving certificate (wired in `manifests/ate-install/ate-api-server.yaml` to `/run/servicedns.podcert.ate.dev/trust-bundle.pem`).
 * `--lifecycle-events-otlp-client-cred-bundle` / `ATE_API_LIFECYCLE_EVENTS_OTLP_CLIENT_CRED_BUNDLE`: PEM credential bundle presented as the client certificate. Defaults to `--atelet-client-cred-bundle` (`/run/podidentity.podcert.ate.dev/credential-bundle.pem`, which carries the SPIFFE URI SAN `spiffe://cluster.local/ns/ate-system/sa/ate-api-server`).
 * `--lifecycle-events-otlp-server-name` / `ATE_API_LIFECYCLE_EVENTS_OTLP_SERVER_NAME`: optional TLS server name override; defaults to the host in `--lifecycle-events-otlp-endpoint`.
 
-Both the CA trust bundle and the client credential bundle are reloaded on disk change, so PodCertificate rotations take effect without restarting `ateapi`. Only records whose `event.name` is `ate.actor.state_changed` or `ate.actor.crashed` are forwarded to this exporter, and enabling it does not change `OTEL_LOGS_EXPORTER`: when `OTEL_LOGS_EXPORTER` is unset/`none`, `ateapi` still writes the stdout JSON log lines alongside the direct mTLS export, and when `OTEL_LOGS_EXPORTER` includes `otlp`, the default collector continues to receive the full event stream.
+Both the CA trust bundle and the client credential bundle are reloaded on disk change, so PodCertificate rotations take effect without restarting `ateapi`. Only records whose `event.name` matches `internal/actorevent.IsLifecycleEvent` (`ate.actor.state_changed`, `ate.actor.crashed`, `ate.actor.volume_provisioned`, or `ate.actor.volume_deleted`) are forwarded to this exporter, and enabling it does not change `OTEL_LOGS_EXPORTER`: when `OTEL_LOGS_EXPORTER` is unset/`none`, `ateapi` still writes the stdout JSON log lines alongside the direct mTLS export, and when `OTEL_LOGS_EXPORTER` includes `otlp`, the default collector continues to receive the full event stream.
 
 ### Per-Actor Usage Events
 

@@ -108,6 +108,12 @@ func NewRPCService(
 	return s
 }
 
+// SetLabelActorVolumes configures whether CreateVolume calls append sanitized
+// ate_atespace and ate_actor_uid labels to CSI StorageClass parameters["labels"].
+func (s *RPCService) SetLabelActorVolumes(enabled bool) {
+	s.actorWorkflow.labelActorVolumes = enabled
+}
+
 // serviceStore enumerates the exact storage methods needed by
 // the control API and nothing more.
 type serviceStore interface {
