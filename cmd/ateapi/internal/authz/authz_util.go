@@ -65,6 +65,8 @@ const (
 	RelationCanResume               = "can_resume"
 	RelationCanSuspend              = "can_suspend"
 	RelationCanRevert               = "can_revert"
+	RelationCanSetLabels            = "can_set_labels"
+	RelationCanManageHolds          = "can_manage_holds"
 	RelationCanDrain                = "can_drain"
 	RelationCanListActorAssignments = "can_list_actor_assignments"
 	RelationCanCreateAccessPolicy   = "can_create_access_policy"

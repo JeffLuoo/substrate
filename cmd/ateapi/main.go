@@ -105,10 +105,11 @@ var (
 	ateletClientCredBundle = pflag.String("atelet-client-cred-bundle", "", "Credential bundle presented as the client certificate when dialing atelet.")
 	ateletServiceAccount   = pflag.String("atelet-service-account", installdefaults.AteletServiceAccount, "ServiceAccount atelet runs as. It is the service-account segment of the SPIFFE ID expected on atelet's certificate, so it has to match what the deployment actually creates; a deployment that prefixes resource names needs it set.")
 
-	lifecycleEventsOTLPEndpoint         = pflag.String("lifecycle-events-otlp-endpoint", "", "Optional OTLP/gRPC endpoint (host:port or https://host[:port]) to export actor lifecycle events (ate.actor.state_changed, ate.actor.crashed, ate.actor.volume_provisioned, and ate.actor.volume_deleted) over mTLS. Empty disables the extra exporter.")
+	lifecycleEventsOTLPEndpoint         = pflag.String("lifecycle-events-otlp-endpoint", "", "Optional OTLP/gRPC endpoint (host:port or https://host[:port]) to export actor lifecycle events (ate.actor.state_changed, ate.actor.crashed, ate.actor.volume_provisioned, ate.actor.volume_deleted, ate.actor.labels_changed, and ate.actor.hold_changed) over mTLS. Empty disables the extra exporter.")
 	lifecycleEventsOTLPCAFile           = pflag.String("lifecycle-events-otlp-ca-file", "", "PEM trust bundle used to verify the server certificate of --lifecycle-events-otlp-endpoint.")
 	lifecycleEventsOTLPClientCredBundle = pflag.String("lifecycle-events-otlp-client-cred-bundle", "", "Credential bundle presented as the client certificate when dialing --lifecycle-events-otlp-endpoint. Defaults to --atelet-client-cred-bundle when unset.")
 	lifecycleEventsOTLPServerName       = pflag.String("lifecycle-events-otlp-server-name", "", "Optional TLS server name override when dialing --lifecycle-events-otlp-endpoint. Defaults to the endpoint host.")
+	actorPrefixOwners                   = pflag.String("actor-prefix-owners", "", "Comma-separated <prefix>=<principal> pairs restricting actor label keys and hold names under <prefix>/ to the listed principals (for example agent-cost=spiffe://cluster.local/ns/ate-cost/sa/ate-cost). A prefix may repeat. Unlisted prefixes stay open to any authorized caller.")
 	csiVolumeActorLabels                = pflag.Bool("csi-volume-actor-labels", false, "Append sanitized ate_atespace and ate_actor_uid labels to CSI CreateVolume parameters[\"labels\"] (for CSI drivers such as pd.csi.storage.gke.io that apply volume labels to disks).")
 
 	drainDelay   = pflag.Duration("drain-delay", 13*time.Second, "How long to keep accepting new work after SIGTERM, before starting the gRPC drain.")
@@ -355,6 +356,11 @@ func main() {
 		actorIDCAPool,
 	)
 	controlSrv.SetLabelActorVolumes(*csiVolumeActorLabels)
+	prefixOwners, err := controlapi.ParsePrefixOwners(*actorPrefixOwners)
+	if err != nil {
+		serverboot.Fatal(ctx, "while parsing --actor-prefix-owners", err)
+	}
+	controlSrv.SetPrefixOwners(prefixOwners)
 
 	// Drive stored ActorTemplates through the golden actor flow.
 	templateReconciler := controlapi.NewActorTemplateReconciler(persistence, controlSrv, *templateResyncInterval)
@@ -479,6 +485,7 @@ func loadFlagsFromEnv() error {
 		{"lifecycle-events-otlp-ca-file", lifecycleEventsOTLPCAFile, "ATE_API_LIFECYCLE_EVENTS_OTLP_CA_FILE"},
 		{"lifecycle-events-otlp-client-cred-bundle", lifecycleEventsOTLPClientCredBundle, "ATE_API_LIFECYCLE_EVENTS_OTLP_CLIENT_CRED_BUNDLE"},
 		{"lifecycle-events-otlp-server-name", lifecycleEventsOTLPServerName, "ATE_API_LIFECYCLE_EVENTS_OTLP_SERVER_NAME"},
+		{"actor-prefix-owners", actorPrefixOwners, "ATE_API_ACTOR_PREFIX_OWNERS"},
 	}
 	for _, fb := range envFallbacks {
 		if !pflag.CommandLine.Changed(fb.flagName) && *fb.flag == "" {
@@ -544,6 +551,7 @@ func logFlagValues(ctx context.Context) {
 		slog.String("lifecycle-events-otlp-client-cred-bundle", *lifecycleEventsOTLPClientCredBundle),
 		slog.String("lifecycle-events-otlp-server-name", *lifecycleEventsOTLPServerName),
 		slog.Bool("csi-volume-actor-labels", *csiVolumeActorLabels),
+		slog.String("actor-prefix-owners", *actorPrefixOwners),
 		slog.Duration("drain-delay", *drainDelay),
 		slog.Duration("drain-timeout", *drainTimeout),
 		slog.Any("preview", *previewFlags),

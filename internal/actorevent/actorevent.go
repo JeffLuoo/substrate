@@ -110,7 +110,8 @@ var (
 		Keys: append(append([]string{}, identityKeys...),
 			string(ateattr.ActorOperationNameKey),
 			string(ateattr.ActorStateKey)),
-		Conditional: append([]string{}, activationCloseKeys...),
+		Conditional: append(append([]string{}, activationCloseKeys...),
+			string(ateattr.ActorLabelsKey)),
 	}
 
 	Crashed = Event{
@@ -120,7 +121,8 @@ var (
 		Keys: append(append([]string{}, identityKeys...),
 			string(ateattr.ActorOperationNameKey),
 			string(ateattr.ActorStateKey)),
-		Conditional: append([]string{}, activationCloseKeys...),
+		Conditional: append(append([]string{}, activationCloseKeys...),
+			string(ateattr.ActorLabelsKey)),
 	}
 
 	UsageSampled = Event{
@@ -155,6 +157,30 @@ var (
 			string(ateattr.VolumeStorageClassKey),
 			string(ateattr.VolumeDriverKey),
 			string(ateattr.VolumeCapacityBytesKey)),
+		Conditional: []string{string(ateattr.ActorLabelsKey)},
+	}
+
+	LabelsChanged = Event{
+		Name:     "ate.actor.labels_changed",
+		Body:     "Actor labels changed",
+		Severity: log.SeverityInfo,
+		Keys: append(append([]string{}, identityKeys...),
+			string(ateattr.ActorLabelsKey)),
+	}
+
+	HoldChanged = Event{
+		Name:     "ate.actor.hold_changed",
+		Body:     "Actor hold changed",
+		Severity: log.SeverityInfo,
+		Keys: append(append([]string{}, identityKeys...),
+			string(ateattr.ActorHoldNameKey),
+			string(ateattr.ActorHoldActionKey),
+			string(ateattr.ActorStateKey)),
+		Conditional: []string{
+			string(ateattr.ActorHoldReasonKey),
+			string(ateattr.ActorHoldCreatorKey),
+			string(ateattr.ActorLabelsKey),
+		},
 	}
 
 	VolumeDeleted = Event{
@@ -171,22 +197,26 @@ var (
 		Conditional: []string{
 			string(ateattr.VolumeStorageClassKey),
 			string(ateattr.VolumeCapacityBytesKey),
+			string(ateattr.ActorLabelsKey),
 		},
 	}
 )
 
 // events is the whole vocabulary, which the registry test walks. An event left
 // out of it is never checked against docs/metrics/registry/events.yaml.
-var events = []Event{StateChanged, Crashed, UsageSampled, VolumeProvisioned, VolumeDeleted}
+var events = []Event{StateChanged, Crashed, UsageSampled, VolumeProvisioned, VolumeDeleted, LabelsChanged, HoldChanged}
 
 // IsLifecycleEvent reports whether eventName is an actor lifecycle event
 // (ate.actor.state_changed, ate.actor.crashed, ate.actor.volume_provisioned,
-// or ate.actor.volume_deleted).
+// ate.actor.volume_deleted, ate.actor.labels_changed, or
+// ate.actor.hold_changed).
 func IsLifecycleEvent(eventName string) bool {
 	return eventName == StateChanged.Name ||
 		eventName == Crashed.Name ||
 		eventName == VolumeProvisioned.Name ||
-		eventName == VolumeDeleted.Name
+		eventName == VolumeDeleted.Name ||
+		eventName == LabelsChanged.Name ||
+		eventName == HoldChanged.Name
 }
 
 // BuildRecord turns the stdout record into its OTLP form. Attributes carry

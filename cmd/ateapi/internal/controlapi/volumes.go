@@ -295,6 +295,7 @@ func logActorVolumeProvisioned(ctx context.Context, actor *ateapipb.Actor, templ
 		slog.String(string(ateattr.VolumeDriverKey), driver),
 		slog.Int64(string(ateattr.VolumeCapacityBytesKey), capBytes),
 	)
+	attrs = appendActorLabels(attrs, actor)
 	actorevent.Log(ctx, actorevent.VolumeProvisioned, attrs)
 }
 
@@ -318,6 +319,7 @@ func logActorVolumeDeleted(ctx context.Context, actor *ateapipb.Actor, template 
 			break
 		}
 	}
+	attrs = appendActorLabels(attrs, actor)
 	actorevent.Log(ctx, actorevent.VolumeDeleted, attrs)
 }
 

@@ -582,6 +582,8 @@ func TestIsLifecycleEvent(t *testing.T) {
 		{Crashed.Name, true},
 		{VolumeProvisioned.Name, true},
 		{VolumeDeleted.Name, true},
+		{LabelsChanged.Name, true},
+		{HoldChanged.Name, true},
 		{UsageSampled.Name, false},
 		{"", false},
 		{"ate.actor.other", false},

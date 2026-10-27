@@ -613,6 +613,18 @@ Hibernate a running actor, capturing its current RAM and disk state into a snaps
 *   **Response:** `SuspendActorResponse` containing the `Actor` object in `ACTOR_STATE_SUSPENDED`, with its snapshot in `status.snapshots`.
 *   A successful suspend releases the actor's previous external snapshot: an actor keeps one, and only tags outlive it. To keep the snapshot a suspend just wrote, tag it with `CreateTag` while the actor is still suspended.
 
+#### `SetActorLabels`
+Merges `labels` into the actor's `labels` and removes the keys in `delete_keys`. Idempotent. Labels can also be set at `CreateActor`; `UpdateActor` keeps the stored labels. Each change emits `ate.actor.labels_changed`, and `ate.actor.*` events from `ateapi` carry the labels as `ate.actor.labels`.
+
+#### `AddActorHold` / `RemoveActorHold`
+A hold (`status.holds`) keeps an actor suspended until it is removed. Its `name` is `<prefix>/<key>`, such as `agent-cost/budget`.
+*   `AddActorHold` upserts by name, stamps `created_by` from the caller and `created_at` on first add, and suspends a `RUNNING` or `RESUMING` actor, so the caller never needs `SuspendActor`.
+*   While any hold remains, every resume (manual `ResumeActor` and router auto-resume) fails with `FAILED_PRECONDITION` carrying `google.rpc.ErrorInfo{reason: "ACTOR_HELD", domain: "ate.dev", metadata: {hold, reason}}`. The router returns `423 Locked` and does not retry.
+*   `RemoveActorHold` is a no-op for an absent hold and never resumes the actor.
+*   Each change emits `ate.actor.hold_changed`.
+
+Labels and holds cannot be managed from inside a sandbox. `--actor-prefix-owners` (`ATE_API_ACTOR_PREFIX_OWNERS`), for example `agent-cost=spiffe://cluster.local/ns/ate-cost/sa/ate-cost`, restricts label keys and hold names under a prefix to the listed principals.
+
 #### Snapshot lifetime
 
 Every external snapshot has exactly one owner, and the control plane deletes it when that owner lets go:

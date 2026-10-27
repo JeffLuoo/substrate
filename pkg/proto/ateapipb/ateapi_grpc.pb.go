@@ -62,6 +62,9 @@ const (
 	Control_MarkWorkerUnavailable_FullMethodName      = "/ateapi.Control/MarkWorkerUnavailable"
 	Control_ListWorkerActorAssignments_FullMethodName = "/ateapi.Control/ListWorkerActorAssignments"
 	Control_ListActors_FullMethodName                 = "/ateapi.Control/ListActors"
+	Control_SetActorLabels_FullMethodName             = "/ateapi.Control/SetActorLabels"
+	Control_AddActorHold_FullMethodName               = "/ateapi.Control/AddActorHold"
+	Control_RemoveActorHold_FullMethodName            = "/ateapi.Control/RemoveActorHold"
 	Control_CreateAtespace_FullMethodName             = "/ateapi.Control/CreateAtespace"
 	Control_GetAtespace_FullMethodName                = "/ateapi.Control/GetAtespace"
 	Control_ListAtespaces_FullMethodName              = "/ateapi.Control/ListAtespaces"
@@ -172,6 +175,18 @@ type ControlClient interface {
 	ListWorkerActorAssignments(ctx context.Context, in *ListWorkerActorAssignmentsRequest, opts ...grpc.CallOption) (*ListWorkerActorAssignmentsResponse, error)
 	// List Actors.
 	ListActors(ctx context.Context, in *ListActorsRequest, opts ...grpc.CallOption) (*ListActorsResponse, error)
+	// Merge labels into an Actor and delete the keys named in delete_keys.
+	// Idempotent. A key with a "<prefix>/" may be restricted to the callers
+	// that own the prefix.
+	SetActorLabels(ctx context.Context, in *SetActorLabelsRequest, opts ...grpc.CallOption) (*Actor, error)
+	// Add a hold to an Actor, or replace the hold with the same name. A held
+	// Actor is suspended if it is running or resuming, and every resume fails
+	// with FAILED_PRECONDITION and google.rpc.ErrorInfo reason ACTOR_HELD until
+	// every hold is removed.
+	AddActorHold(ctx context.Context, in *AddActorHoldRequest, opts ...grpc.CallOption) (*Actor, error)
+	// Remove a hold from an Actor. Removing an absent hold is a no-op. Removing
+	// the last hold does not resume the Actor.
+	RemoveActorHold(ctx context.Context, in *RemoveActorHoldRequest, opts ...grpc.CallOption) (*Actor, error)
 	// Create a new Atespace. Substrate-native, stored in database.
 	CreateAtespace(ctx context.Context, in *CreateAtespaceRequest, opts ...grpc.CallOption) (*Atespace, error)
 	// Get an Atespace by name.
@@ -506,6 +521,36 @@ func (c *controlClient) ListActors(ctx context.Context, in *ListActorsRequest, o
 	return out, nil
 }
 
+func (c *controlClient) SetActorLabels(ctx context.Context, in *SetActorLabelsRequest, opts ...grpc.CallOption) (*Actor, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(Actor)
+	err := c.cc.Invoke(ctx, Control_SetActorLabels_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *controlClient) AddActorHold(ctx context.Context, in *AddActorHoldRequest, opts ...grpc.CallOption) (*Actor, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(Actor)
+	err := c.cc.Invoke(ctx, Control_AddActorHold_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *controlClient) RemoveActorHold(ctx context.Context, in *RemoveActorHoldRequest, opts ...grpc.CallOption) (*Actor, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(Actor)
+	err := c.cc.Invoke(ctx, Control_RemoveActorHold_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *controlClient) CreateAtespace(ctx context.Context, in *CreateAtespaceRequest, opts ...grpc.CallOption) (*Atespace, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(Atespace)
@@ -749,6 +794,18 @@ type ControlServer interface {
 	ListWorkerActorAssignments(context.Context, *ListWorkerActorAssignmentsRequest) (*ListWorkerActorAssignmentsResponse, error)
 	// List Actors.
 	ListActors(context.Context, *ListActorsRequest) (*ListActorsResponse, error)
+	// Merge labels into an Actor and delete the keys named in delete_keys.
+	// Idempotent. A key with a "<prefix>/" may be restricted to the callers
+	// that own the prefix.
+	SetActorLabels(context.Context, *SetActorLabelsRequest) (*Actor, error)
+	// Add a hold to an Actor, or replace the hold with the same name. A held
+	// Actor is suspended if it is running or resuming, and every resume fails
+	// with FAILED_PRECONDITION and google.rpc.ErrorInfo reason ACTOR_HELD until
+	// every hold is removed.
+	AddActorHold(context.Context, *AddActorHoldRequest) (*Actor, error)
+	// Remove a hold from an Actor. Removing an absent hold is a no-op. Removing
+	// the last hold does not resume the Actor.
+	RemoveActorHold(context.Context, *RemoveActorHoldRequest) (*Actor, error)
 	// Create a new Atespace. Substrate-native, stored in database.
 	CreateAtespace(context.Context, *CreateAtespaceRequest) (*Atespace, error)
 	// Get an Atespace by name.
@@ -879,6 +936,15 @@ func (UnimplementedControlServer) ListWorkerActorAssignments(context.Context, *L
 }
 func (UnimplementedControlServer) ListActors(context.Context, *ListActorsRequest) (*ListActorsResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method ListActors not implemented")
+}
+func (UnimplementedControlServer) SetActorLabels(context.Context, *SetActorLabelsRequest) (*Actor, error) {
+	return nil, status.Error(codes.Unimplemented, "method SetActorLabels not implemented")
+}
+func (UnimplementedControlServer) AddActorHold(context.Context, *AddActorHoldRequest) (*Actor, error) {
+	return nil, status.Error(codes.Unimplemented, "method AddActorHold not implemented")
+}
+func (UnimplementedControlServer) RemoveActorHold(context.Context, *RemoveActorHoldRequest) (*Actor, error) {
+	return nil, status.Error(codes.Unimplemented, "method RemoveActorHold not implemented")
 }
 func (UnimplementedControlServer) CreateAtespace(context.Context, *CreateAtespaceRequest) (*Atespace, error) {
 	return nil, status.Error(codes.Unimplemented, "method CreateAtespace not implemented")
@@ -1468,6 +1534,60 @@ func _Control_ListActors_Handler(srv interface{}, ctx context.Context, dec func(
 	return interceptor(ctx, in, info, handler)
 }
 
+func _Control_SetActorLabels_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(SetActorLabelsRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ControlServer).SetActorLabels(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Control_SetActorLabels_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ControlServer).SetActorLabels(ctx, req.(*SetActorLabelsRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Control_AddActorHold_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(AddActorHoldRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ControlServer).AddActorHold(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Control_AddActorHold_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ControlServer).AddActorHold(ctx, req.(*AddActorHoldRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Control_RemoveActorHold_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(RemoveActorHoldRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ControlServer).RemoveActorHold(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Control_RemoveActorHold_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ControlServer).RemoveActorHold(ctx, req.(*RemoveActorHoldRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _Control_CreateAtespace_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(CreateAtespaceRequest)
 	if err := dec(in); err != nil {
@@ -1860,6 +1980,18 @@ var Control_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "ListActors",
 			Handler:    _Control_ListActors_Handler,
+		},
+		{
+			MethodName: "SetActorLabels",
+			Handler:    _Control_SetActorLabels_Handler,
+		},
+		{
+			MethodName: "AddActorHold",
+			Handler:    _Control_AddActorHold_Handler,
+		},
+		{
+			MethodName: "RemoveActorHold",
+			Handler:    _Control_RemoveActorHold_Handler,
 		},
 		{
 			MethodName: "CreateAtespace",

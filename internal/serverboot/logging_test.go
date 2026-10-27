@@ -383,27 +383,27 @@ func TestParseLifecycleOTLPEndpoint(t *testing.T) {
 	}{
 		{
 			name:           "host and port",
-			raw:            "finops.ate-finops.svc:4317",
-			wantHostPort:   "finops.ate-finops.svc:4317",
-			wantServerName: "finops.ate-finops.svc",
+			raw:            "cost.ate-cost.svc:4317",
+			wantHostPort:   "cost.ate-cost.svc:4317",
+			wantServerName: "cost.ate-cost.svc",
 		},
 		{
 			name:           "bare host defaults to 4317",
-			raw:            "finops.ate-finops.svc",
-			wantHostPort:   "finops.ate-finops.svc:4317",
-			wantServerName: "finops.ate-finops.svc",
+			raw:            "cost.ate-cost.svc",
+			wantHostPort:   "cost.ate-cost.svc:4317",
+			wantServerName: "cost.ate-cost.svc",
 		},
 		{
 			name:           "https URL with port",
-			raw:            "https://finops.ate-finops.svc:4317",
-			wantHostPort:   "finops.ate-finops.svc:4317",
-			wantServerName: "finops.ate-finops.svc",
+			raw:            "https://cost.ate-cost.svc:4317",
+			wantHostPort:   "cost.ate-cost.svc:4317",
+			wantServerName: "cost.ate-cost.svc",
 		},
 		{
 			name:           "https URL without port defaults to 4317",
-			raw:            "https://finops.ate-finops.svc",
-			wantHostPort:   "finops.ate-finops.svc:4317",
-			wantServerName: "finops.ate-finops.svc",
+			raw:            "https://cost.ate-cost.svc",
+			wantHostPort:   "cost.ate-cost.svc:4317",
+			wantServerName: "cost.ate-cost.svc",
 		},
 		{
 			name:           "ipv4 literal",
@@ -430,7 +430,7 @@ func TestParseLifecycleOTLPEndpoint(t *testing.T) {
 		},
 		{
 			name:    "http scheme rejected",
-			raw:     "http://finops.ate-finops.svc:4317",
+			raw:     "http://cost.ate-cost.svc:4317",
 			wantErr: true,
 		},
 		{
@@ -440,27 +440,27 @@ func TestParseLifecycleOTLPEndpoint(t *testing.T) {
 		},
 		{
 			name:    "invalid port zero",
-			raw:     "finops.ate-finops.svc:0",
+			raw:     "cost.ate-cost.svc:0",
 			wantErr: true,
 		},
 		{
 			name:    "invalid port out of range",
-			raw:     "finops.ate-finops.svc:70000",
+			raw:     "cost.ate-cost.svc:70000",
 			wantErr: true,
 		},
 		{
 			name:    "invalid port non-numeric",
-			raw:     "finops.ate-finops.svc:otlp",
+			raw:     "cost.ate-cost.svc:otlp",
 			wantErr: true,
 		},
 		{
 			name:    "url with path rejected",
-			raw:     "https://finops.ate-finops.svc:4317/v1/logs",
+			raw:     "https://cost.ate-cost.svc:4317/v1/logs",
 			wantErr: true,
 		},
 		{
 			name:    "hostport with path rejected",
-			raw:     "finops.ate-finops.svc:4317/v1/logs",
+			raw:     "cost.ate-cost.svc:4317/v1/logs",
 			wantErr: true,
 		},
 	} {
@@ -521,7 +521,7 @@ func TestBuildLifecycleOTLPTLSConfigValidation(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			if _, err := BuildLifecycleOTLPTLSConfig(tc.opts, "finops.ate-finops.svc"); err == nil {
+			if _, err := BuildLifecycleOTLPTLSConfig(tc.opts, "cost.ate-cost.svc"); err == nil {
 				t.Errorf("BuildLifecycleOTLPTLSConfig(%+v) error = nil, want error", tc.opts)
 			}
 		})
@@ -532,7 +532,7 @@ func TestInitLoggingLifecycleExporterOverMTLS(t *testing.T) {
 	t.Cleanup(func() { actorevent.SetConsole(false) })
 
 	const expectedSPIFFEID = "spiffe://cluster.local/ns/ate-system/sa/ate-api-server"
-	const finopsDNSName = "finops.ate-finops.svc"
+	const costDNSName = "cost.ate-cost.svc"
 
 	ca := newTestCA(t)
 	dir := t.TempDir()
@@ -542,7 +542,7 @@ func TestInitLoggingLifecycleExporterOverMTLS(t *testing.T) {
 	clientBundle := filepath.Join(dir, "credential-bundle.pem")
 	writeTestFile(t, clientBundle, ca.issueClientBundle(t, expectedSPIFFEID))
 
-	serverCert := ca.issueServerCertWithDNS(t, finopsDNSName)
+	serverCert := ca.issueServerCertWithDNS(t, costDNSName)
 	caPool := x509.NewCertPool()
 	caPool.AddCert(ca.cert)
 
@@ -565,7 +565,7 @@ func TestInitLoggingLifecycleExporterOverMTLS(t *testing.T) {
 	defer cancel()
 
 	// Default OTEL_LOGS_EXPORTER is none (Exporters{}): records must still be
-	// written to stdout while lifecycle events are also exported to FinOps over
+	// written to stdout while lifecycle events are also exported to the Cost Service over
 	// mTLS.
 	lp, err := InitLogging(ctx, LoggingOptions{
 		ServiceName: "ateapi",
@@ -574,7 +574,7 @@ func TestInitLoggingLifecycleExporterOverMTLS(t *testing.T) {
 			Endpoint:         lis.Addr().String(),
 			CAFile:           caFile,
 			ClientCredBundle: clientBundle,
-			ServerName:       finopsDNSName,
+			ServerName:       costDNSName,
 		},
 	})
 	if err != nil {
@@ -640,7 +640,7 @@ func TestInitLoggingLifecycleExporterOverMTLS(t *testing.T) {
 			Endpoint:         "https://" + lis.Addr().String(),
 			CAFile:           caFile,
 			ClientCredBundle: clientBundle,
-			ServerName:       finopsDNSName,
+			ServerName:       costDNSName,
 		},
 	})
 	if err != nil {
@@ -671,7 +671,7 @@ func TestInitLoggingLifecycleExporterOverMTLS(t *testing.T) {
 func TestBuildLifecycleOTLPTLSConfigReloadsCAFile(t *testing.T) {
 	t.Parallel()
 
-	const finopsDNSName = "finops.ate-finops.svc"
+	const costDNSName = "cost.ate-cost.svc"
 	ca1 := newTestCA(t)
 	dir := t.TempDir()
 	caFile := filepath.Join(dir, "trust-bundle.pem")
@@ -683,14 +683,14 @@ func TestBuildLifecycleOTLPTLSConfigReloadsCAFile(t *testing.T) {
 	tlsCfg, err := BuildLifecycleOTLPTLSConfig(LifecycleOTLPOptions{
 		CAFile:           caFile,
 		ClientCredBundle: clientBundle,
-		ServerName:       finopsDNSName,
-	}, finopsDNSName)
+		ServerName:       costDNSName,
+	}, costDNSName)
 	if err != nil {
 		t.Fatalf("BuildLifecycleOTLPTLSConfig() error = %v", err)
 	}
 
 	ca2 := newTestCA(t)
-	serverCert2 := ca2.issueServerCertWithDNS(t, finopsDNSName)
+	serverCert2 := ca2.issueServerCertWithDNS(t, costDNSName)
 	leaf2, err := x509.ParseCertificate(serverCert2.Certificate[0])
 	if err != nil {
 		t.Fatalf("ParseCertificate: %v", err)

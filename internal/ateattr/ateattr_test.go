@@ -769,3 +769,18 @@ func TestNormalizeTemplateDimension(t *testing.T) {
 		})
 	}
 }
+
+func TestActorLabelsValue(t *testing.T) {
+	for _, tc := range []struct {
+		labels map[string]string
+		want   string
+	}{
+		{nil, "{}"},
+		{map[string]string{}, "{}"},
+		{map[string]string{"z": "1", "agent-cost/budget-group": "team-a.root"}, `{"agent-cost/budget-group":"team-a.root","z":"1"}`},
+	} {
+		if got := ActorLabelsValue(tc.labels); got != tc.want {
+			t.Errorf("ActorLabelsValue(%v) = %q, want %q", tc.labels, got, tc.want)
+		}
+	}
+}

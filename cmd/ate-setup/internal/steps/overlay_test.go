@@ -405,7 +405,7 @@ func testPatchWithFiltersFile(t *testing.T, content string) {
 	}
 	env := &Env{Cfg: &config.Config{
 		Root:                               root,
-		AdditionalEgressExtprocService:     "ate-finops/finops:9002",
+		AdditionalEgressExtprocService:     "ate-cost/cost:9002",
 		AdditionalEgressExtprocFiltersFile: writeFiltersFile(t, content),
 	}}
 
@@ -490,7 +490,7 @@ func TestLoadAdditionalEgressExtprocFiltersRejects(t *testing.T) {
 		},
 		{
 			"google_grpc",
-			"- name: envoy.filters.http.ext_proc\n  typed_config:\n    \"@type\": " + extProcFilterType + "\n    grpc_service:\n      google_grpc:\n        target_uri: finops.example.com:443\n",
+			"- name: envoy.filters.http.ext_proc\n  typed_config:\n    \"@type\": " + extProcFilterType + "\n    grpc_service:\n      google_grpc:\n        target_uri: cost.example.com:443\n",
 			`filter 1 dials ""`,
 		},
 		{"duplicate key", meterAndGateFilters + "  name: twice\n", "want a YAML list"},
@@ -1324,7 +1324,7 @@ func TestRenderAgentgatewayAdditionalExtprocService(t *testing.T) {
 		service string
 	}{
 		{name: "disabled"},
-		{name: "enabled", service: "ate-finops/finops:9002"},
+		{name: "enabled", service: "ate-cost/cost:9002"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			src := images.Source{Repo: "example.com/substrate", Tag: "v1.2.3"}
@@ -1387,8 +1387,8 @@ func TestRenderAgentgatewayAdditionalExtprocService(t *testing.T) {
 					if err := extProcNode.YNode().Decode(&got); err != nil {
 						t.Fatal(err)
 					}
-					if got["host"] != "finops.ate-finops.svc.cluster.local:9002" {
-						t.Errorf("%s extProc host = %v, want finops.ate-finops.svc.cluster.local:9002", protocol, got["host"])
+					if got["host"] != "cost.ate-cost.svc.cluster.local:9002" {
+						t.Errorf("%s extProc host = %v, want cost.ate-cost.svc.cluster.local:9002", protocol, got["host"])
 					}
 					if got["failureMode"] != "failClosed" {
 						t.Errorf("%s extProc failureMode = %v, want failClosed", protocol, got["failureMode"])
@@ -1412,7 +1412,7 @@ func TestRenderAgentgatewayAdditionalExtprocService(t *testing.T) {
 
 func TestPatchAgentgatewayExtprocRequiresTwoMarkers(t *testing.T) {
 	for _, raw := range []string{"", "#ATE_AGENTGATEWAY_EXTPROC\n", "#ATE_AGENTGATEWAY_EXTPROC\n#ATE_AGENTGATEWAY_EXTPROC\n#ATE_AGENTGATEWAY_EXTPROC\n"} {
-		if _, err := patchAgentgatewayEgressExtproc([]byte(raw), "ate-finops/finops:9002"); err == nil {
+		if _, err := patchAgentgatewayEgressExtproc([]byte(raw), "ate-cost/cost:9002"); err == nil {
 			t.Errorf("accepted a manifest without exactly two markers: %q", raw)
 		}
 	}

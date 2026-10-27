@@ -19,6 +19,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"sync"
 
 	"go.ate.dev/substrate/cmd/ateapi/internal/scheduling"
 	"go.ate.dev/substrate/cmd/ateapi/internal/store"
@@ -97,7 +98,16 @@ func logActorState(ctx context.Context, actor *ateapipb.Actor, opName, state str
 		slog.String(string(ateattr.ActorOperationNameKey), ateattr.NormalizeOperationName(opName)),
 		slog.String(string(ateattr.ActorStateKey), state))
 	attrs = append(attrs, extra...)
+	attrs = appendActorLabels(attrs, actor)
 	actorevent.Log(ctx, actorevent.StateChanged, attrs)
+}
+
+// appendActorLabels adds ate.actor.labels when the actor has labels.
+func appendActorLabels(attrs []slog.Attr, actor *ateapipb.Actor) []slog.Attr {
+	if len(actor.GetLabels()) == 0 {
+		return attrs
+	}
+	return append(attrs, slog.String(string(ateattr.ActorLabelsKey), ateattr.ActorLabelsValue(actor.GetLabels())))
 }
 
 // activationCloseAttrs builds the conditional attributes for a closing
@@ -158,6 +168,9 @@ type ActorWorkflow struct {
 	pluginRegistry       VolumePluginRegistry
 	objectStorePlugin    objectstorev1.ControlProviderClient
 	labelActorVolumes    bool
+	// holdEnforcing holds the keys of actors with a background suspend
+	// under way for a hold, so a router retry storm starts at most one.
+	holdEnforcing sync.Map
 }
 
 // NewActorWorkflow creates a new ActorWorkflow. instruments may be nil.

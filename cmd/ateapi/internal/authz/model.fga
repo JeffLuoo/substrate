@@ -173,3 +173,9 @@ type actor
     define can_pause: [user] or editor from parent_atespace
     define can_suspend: [user] or editor from parent_atespace
     define can_revert: [user] or editor from parent_atespace
+
+    # Labels and holds. A hold suspends the actor and blocks its resumes, so
+    # can_manage_holds can be granted alone to a controller such as a budget
+    # service. ateapi also restricts each "<prefix>/" to its configured owners.
+    define can_set_labels: [user] or editor from parent_atespace
+    define can_manage_holds: [user] or editor from parent_atespace

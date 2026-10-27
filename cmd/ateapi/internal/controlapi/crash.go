@@ -199,6 +199,7 @@ func logActorCrashed(ctx context.Context, actor *ateapipb.Actor, opName string, 
 	attrs = append(attrs, slog.String(string(ateattr.ActorOperationNameKey), ateattr.NormalizeOperationName(opName)))
 	attrs = append(attrs, slog.String(string(ateattr.ActorStateKey), ateattr.ActorStateCrashed))
 	attrs = append(attrs, extra...)
+	attrs = appendActorLabels(attrs, actor)
 	actorevent.Log(ctx, actorevent.Crashed, attrs)
 }
 

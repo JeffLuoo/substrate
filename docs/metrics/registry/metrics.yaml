@@ -662,6 +662,54 @@ groups:
           ate.actor.stats.cpu.time, thus one query serves both signals.
         examples: [1.5]
 
+  - id: registry.ate.actor.metadata
+    type: attribute_group
+    brief: The attributes of the actor label and hold events.
+    attributes:
+      - id: ate.actor.labels
+        stability: development
+        type: string
+        brief: >
+          The labels of the actor as one JSON object with sorted keys, such as
+          {"agent-cost/budget-group":"team-a/root"}.
+        note: >
+          Logs only. Label values are set per actor by callers outside the
+          sandbox, so they have too many values for a metric label.
+        examples: ['{"agent-cost/budget-group":"team-a/root"}']
+      - id: ate.actor.hold.name
+        stability: development
+        type: string
+        brief: >
+          The name of a hold on the actor, as <prefix>/<key>. The prefix names
+          the owner of the hold.
+        note: Logs only. It is only ever recorded beside actor identity.
+        examples: [agent-cost/budget, ax/loop]
+      - id: ate.actor.hold.reason
+        stability: development
+        type: string
+        brief: The human-readable reason that the owner gave for a hold.
+        note: Logs only. Free text.
+        examples: [budget exhausted]
+      - id: ate.actor.hold.created_by
+        stability: development
+        type: string
+        brief: The principal that added a hold.
+        note: Logs only. It is only ever recorded beside actor identity.
+        examples: [spiffe://cluster.local/ns/ate-cost/sa/ate-cost]
+      - id: ate.actor.hold.action
+        stability: development
+        brief: What happened to a hold.
+        type:
+          members:
+            - id: added
+              stability: development
+              value: added
+              brief: The hold was added, or its reason changed.
+            - id: removed
+              stability: development
+              value: removed
+              brief: The hold was removed.
+
   - id: registry.ate.volume
     type: attribute_group
     brief: The attributes of the external CSI volume lifecycle events of an actor.

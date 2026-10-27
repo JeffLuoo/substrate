@@ -31,6 +31,7 @@ import (
 	"errors"
 	"fmt"
 
+	"google.golang.org/genproto/googleapis/rpc/errdetails"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 )
@@ -38,6 +39,8 @@ import (
 type apiError struct {
 	code codes.Code
 	err  error
+	// info, when set, travels as a google.rpc.ErrorInfo status detail.
+	info *errdetails.ErrorInfo
 }
 
 func (e *apiError) Error() string { return e.err.Error() }
@@ -116,6 +119,12 @@ func Internal(format string, args ...any) error {
 	return newf(codes.Internal, format, args...)
 }
 
+// FailedPreconditionWithInfo is FailedPrecondition with a google.rpc.ErrorInfo
+// detail, so a client can branch on info.Reason instead of the message.
+func FailedPreconditionWithInfo(info *errdetails.ErrorInfo, format string, args ...any) error {
+	return &apiError{code: codes.FailedPrecondition, err: fmt.Errorf(format, args...), info: info}
+}
+
 // Code returns the code err reaches the caller with, the same as
 // FromError(err).Code(): codes.OK for nil, and codes.Internal for an error that
 // is neither an apierror nor a context error. It never reads a gRPC status.
@@ -134,7 +143,13 @@ func FromError(err error) (s *status.Status, ok bool) {
 	}
 	var apiErr *apiError
 	if errors.As(err, &apiErr) {
-		return status.New(apiErr.code, apiErr.Error()), true
+		s := status.New(apiErr.code, apiErr.Error())
+		if apiErr.info != nil {
+			if withInfo, derr := s.WithDetails(apiErr.info); derr == nil {
+				s = withInfo
+			}
+		}
+		return s, true
 	}
 	if s := status.FromContextError(err); s.Code() != codes.Unknown {
 		return s, true

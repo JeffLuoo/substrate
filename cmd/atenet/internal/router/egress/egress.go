@@ -294,10 +294,13 @@ func (h *Handler) validateActor(ctx context.Context, actorRef resources.ActorRef
 			actorRef.Atespace, actorRef.Name, certUID, actor.GetMetadata().GetUid())
 	}
 
-	// The actor performing egress must actually be running.
-	if actor.GetStatus().GetState() != ateapipb.ActorState_ACTOR_STATE_RUNNING {
+	// The actor performing egress must be awake. RESUMING counts: the app
+	// boots and may call out before its wakeup probe passes.
+	switch actor.GetStatus().GetState() {
+	case ateapipb.ActorState_ACTOR_STATE_RUNNING, ateapipb.ActorState_ACTOR_STATE_RESUMING:
+	default:
 		return nil, extproc.NewReqError(envoy_type.StatusCode_Forbidden,
-			"egress denied: actor %q/%q is %s, not running", actorRef.Atespace, actorRef.Name, actor.GetStatus().GetState())
+			"egress denied: actor %q/%q is %s, not running or resuming", actorRef.Atespace, actorRef.Name, actor.GetStatus().GetState())
 	}
 	return actor, nil
 }

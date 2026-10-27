@@ -20,9 +20,31 @@ import (
 	"fmt"
 	"testing"
 
+	"google.golang.org/genproto/googleapis/rpc/errdetails"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/proto"
 )
+
+func TestFailedPreconditionWithInfo(t *testing.T) {
+	info := &errdetails.ErrorInfo{Reason: "ACTOR_HELD", Domain: "ate.dev", Metadata: map[string]string{"hold": "agent-cost/budget"}}
+	err := fmt.Errorf("workflow failed: %w", FailedPreconditionWithInfo(info, "actor held by %s", "agent-cost/budget"))
+	s, ok := FromError(err)
+	if !ok || s.Code() != codes.FailedPrecondition {
+		t.Fatalf("FromError() = %v, %v; want FailedPrecondition", s, ok)
+	}
+	if s.Message() != "actor held by agent-cost/budget" {
+		t.Errorf("Message() = %q", s.Message())
+	}
+	details := s.Details()
+	if len(details) != 1 {
+		t.Fatalf("Details() = %v, want one ErrorInfo", details)
+	}
+	got, ok := details[0].(*errdetails.ErrorInfo)
+	if !ok || !proto.Equal(got, info) {
+		t.Errorf("Details()[0] = %v, want %v", details[0], info)
+	}
+}
 
 func TestConstructors(t *testing.T) {
 	tests := []struct {

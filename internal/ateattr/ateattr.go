@@ -19,6 +19,7 @@
 package ateattr
 
 import (
+	"encoding/json"
 	"log/slog"
 	"slices"
 
@@ -208,6 +209,34 @@ const (
 	VolumeDriverKey        = attribute.Key("ate.volume.driver")
 	VolumeCapacityBytesKey = attribute.Key("ate.volume.capacity_bytes")
 )
+
+// Keys of the actor label and hold events (ate.actor.labels_changed and
+// ate.actor.hold_changed). ActorLabelsKey is the actor's labels as one JSON
+// object. Logs only: label values and hold reasons are per-actor or unbounded.
+const (
+	ActorLabelsKey      = attribute.Key("ate.actor.labels")
+	ActorHoldNameKey    = attribute.Key("ate.actor.hold.name")
+	ActorHoldActionKey  = attribute.Key("ate.actor.hold.action")
+	ActorHoldReasonKey  = attribute.Key("ate.actor.hold.reason")
+	ActorHoldCreatorKey = attribute.Key("ate.actor.hold.created_by")
+)
+
+// Values for ActorHoldActionKey.
+const (
+	HoldActionAdded   = "added"
+	HoldActionRemoved = "removed"
+)
+
+// ActorLabelsValue encodes labels as a JSON object with sorted keys, the value
+// of ActorLabelsKey. A nil or empty map encodes as "{}".
+func ActorLabelsValue(labels map[string]string) string {
+	if len(labels) == 0 {
+		return "{}"
+	}
+	// encoding/json sorts map keys, and a map[string]string cannot fail.
+	b, _ := json.Marshal(labels)
+	return string(b)
+}
 
 // Values for StatsKindKey. An initial or final sample brackets an activation; a
 // periodic one is the timer's.

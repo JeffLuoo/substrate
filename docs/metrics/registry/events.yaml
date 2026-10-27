@@ -96,6 +96,10 @@ groups:
           conditionally_required: >
             When the transition closes an active worker assignment whose Worker
             reported an actor slot capacity.
+      - ref: ate.actor.labels
+        requirement_level:
+          conditionally_required: >
+            When the actor has labels.
 
   - id: event.ate.actor.crashed
     type: event
@@ -159,6 +163,10 @@ groups:
           conditionally_required: >
             When the crash closes an active worker assignment whose Worker
             reported an actor slot capacity.
+      - ref: ate.actor.labels
+        requirement_level:
+          conditionally_required: >
+            When the actor has labels.
 
   - id: event.ate.actor.usage_sampled
     type: event
@@ -273,6 +281,10 @@ groups:
         requirement_level: required
       - ref: ate.volume.capacity_bytes
         requirement_level: required
+      - ref: ate.actor.labels
+        requirement_level:
+          conditionally_required: >
+            When the actor has labels.
 
   - id: event.ate.actor.volume_deleted
     type: event
@@ -317,3 +329,84 @@ groups:
           conditionally_required: >
             When the ActorTemplate still exists at actor deletion time and
             declares a valid capacity quantity for the volume.
+      - ref: ate.actor.labels
+        requirement_level:
+          conditionally_required: >
+            When the actor has labels.
+
+  - id: event.ate.actor.labels_changed
+    type: event
+    name: ate.actor.labels_changed
+    stability: development
+    brief: The labels of an actor changed.
+    note: >
+      ateapi writes one record for each committed SetActorLabels that changed
+      the labels, and one at CreateActor when the actor is made with labels.
+      ate.actor.labels holds the whole label set after the change, so the most
+      recent record for an ate.actor.uid gives the labels the actor has now.
+      Labels are set only through ateapi, never from inside the sandbox.
+    annotations:
+      substrate:
+        emitted_by: [ateapi]
+        code_anchor: cmd/ateapi/internal/controlapi/actor_holds.go
+        cuj: Which tenant, budget, or task does this actor belong to?
+    attributes:
+      - ref: ate.atespace
+        requirement_level: required
+      - ref: ate.actor.name
+        requirement_level: required
+      - ref: ate.actor.uid
+        requirement_level: required
+      - ref: ate.template.atespace
+        requirement_level: required
+      - ref: ate.template.name
+        requirement_level: required
+      - ref: ate.actor.labels
+        requirement_level: required
+
+  - id: event.ate.actor.hold_changed
+    type: event
+    name: ate.actor.hold_changed
+    stability: development
+    brief: A hold was added to or removed from an actor.
+    note: >
+      ateapi writes one record for each committed AddActorHold or
+      RemoveActorHold that changed the holds. An AddActorHold that only
+      changes the reason of an existing hold is recorded as added. A held
+      actor is suspended and every resume of it fails with ErrorInfo reason
+      ACTOR_HELD; ate.actor.state is the state at the commit, before the
+      suspend that a new hold starts.
+    annotations:
+      substrate:
+        emitted_by: [ateapi]
+        code_anchor: cmd/ateapi/internal/controlapi/actor_holds.go
+        cuj: Who is keeping this actor suspended, and why?
+    attributes:
+      - ref: ate.atespace
+        requirement_level: required
+      - ref: ate.actor.name
+        requirement_level: required
+      - ref: ate.actor.uid
+        requirement_level: required
+      - ref: ate.template.atespace
+        requirement_level: required
+      - ref: ate.template.name
+        requirement_level: required
+      - ref: ate.actor.hold.name
+        requirement_level: required
+      - ref: ate.actor.hold.action
+        requirement_level: required
+      - ref: ate.actor.state
+        requirement_level: required
+      - ref: ate.actor.hold.reason
+        requirement_level:
+          conditionally_required: >
+            When the hold has a reason.
+      - ref: ate.actor.hold.created_by
+        requirement_level:
+          conditionally_required: >
+            When the hold records the principal that added it.
+      - ref: ate.actor.labels
+        requirement_level:
+          conditionally_required: >
+            When the actor has labels.

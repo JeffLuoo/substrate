@@ -16,6 +16,7 @@ package apivalidation
 
 import (
 	"context"
+	"strings"
 
 	"go.ate.dev/substrate/internal/resources"
 	"go.ate.dev/substrate/pkg/proto/ateapipb"
@@ -80,6 +81,38 @@ func ValidateRevertActorRequest(ctx context.Context, req *ateapipb.RevertActorRe
 	// Call the generated validation.
 	op := MakeCreateOp(ctx)
 	return Validate_RevertActorRequest(ctx, op, nil, req, nil)
+}
+
+func ValidateSetActorLabelsRequest(ctx context.Context, req *ateapipb.SetActorLabelsRequest) field.ErrorList {
+	op := MakeCreateOp(ctx)
+	return Validate_SetActorLabelsRequest(ctx, op, nil, req, nil)
+}
+
+func ValidateAddActorHoldRequest(ctx context.Context, req *ateapipb.AddActorHoldRequest) field.ErrorList {
+	op := MakeCreateOp(ctx)
+	errs := Validate_AddActorHoldRequest(ctx, op, nil, req, nil)
+	if req.GetHold() != nil {
+		errs = append(errs, validateHoldName(field.NewPath("hold", "name"), req.GetHold().GetName())...)
+	}
+	return errs
+}
+
+func ValidateRemoveActorHoldRequest(ctx context.Context, req *ateapipb.RemoveActorHoldRequest) field.ErrorList {
+	op := MakeCreateOp(ctx)
+	errs := Validate_RemoveActorHoldRequest(ctx, op, nil, req, nil)
+	return append(errs, validateHoldName(field.NewPath("hold_name"), req.GetHoldName())...)
+}
+
+// validateHoldName requires "<prefix>/<key>": the prefix names the owner.
+// The format tag has already checked the characters.
+func validateHoldName(fldPath *field.Path, name string) field.ErrorList {
+	if name == "" {
+		return nil // reported as required
+	}
+	if prefix, key, ok := strings.Cut(name, "/"); !ok || prefix == "" || key == "" {
+		return field.ErrorList{field.Invalid(fldPath, name, "must be <prefix>/<key>, such as agent-cost/budget")}
+	}
+	return nil
 }
 
 func ValidateMintActorJWTRequest(ctx context.Context, req *ateapipb.MintActorJwtRequest) field.ErrorList {

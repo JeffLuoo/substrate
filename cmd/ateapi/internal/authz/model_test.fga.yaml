@@ -270,6 +270,8 @@ tests:
           can_resume: true
           can_suspend: true
           can_revert: true
+          can_set_labels: true
+          can_manage_holds: true
           can_get_egress_policy: true
           can_create_egress_policy: true
           can_update_egress_policy: true
@@ -284,6 +286,8 @@ tests:
           can_resume: true
           can_suspend: true
           can_revert: true
+          can_set_labels: true
+          can_manage_holds: true
           can_get_egress_policy: true
           can_create_egress_policy: true
           can_update_egress_policy: true
@@ -298,6 +302,8 @@ tests:
           can_resume: false
           can_suspend: false
           can_revert: false
+          can_set_labels: false
+          can_manage_holds: false
           can_get_egress_policy: true
           can_create_egress_policy: false
           can_update_egress_policy: false
@@ -312,6 +318,8 @@ tests:
           can_resume: false
           can_suspend: false
           can_revert: false
+          can_set_labels: false
+          can_manage_holds: false
           can_get_egress_policy: true
           can_create_egress_policy: false
           can_update_egress_policy: false

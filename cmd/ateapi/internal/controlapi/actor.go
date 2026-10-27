@@ -21,6 +21,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"maps"
 	"net/url"
 	"slices"
 	"time"
@@ -69,6 +70,12 @@ func (s *RPCService) CreateActor(ctx context.Context, req *ateapipb.CreateActorR
 	}()
 
 	setSpanActorRefAttributes(ctx, resources.ActorRefFromActor(inActor))
+
+	if len(inActor.GetLabels()) > 0 {
+		if err := s.checkMetadataWriter(ctx, slices.Collect(maps.Keys(inActor.GetLabels()))...); err != nil {
+			return nil, err
+		}
+	}
 
 	// Handle the creation, including validation of the final stored object.
 	stored, err := s.impl.CreateActor(ctx, inActor)
@@ -172,6 +179,9 @@ func (s *ServiceImpl) CreateActor(ctx context.Context, inActor *ateapipb.Actor) 
 	// Without this an actor that is created and never resumed has no record at
 	// all, at any retention.
 	logActorStateChanged(ctx, stored, ateattr.OperationCreate)
+	if len(stored.GetLabels()) > 0 {
+		logActorLabelsChanged(ctx, stored)
+	}
 
 	return stored, nil
 }
@@ -261,8 +271,9 @@ func (s *RPCService) UpdateActor(ctx context.Context, req *ateapipb.UpdateActorR
 	setSpanActorRefAttributes(ctx, actorRef)
 
 	storedActor, err := s.impl.UpdateActor(ctx, actorRef, store.PreconditionFrom(inActor), func(toUpdate *ateapipb.Actor) error {
-		// Status and Metadata are server-owned fields.
-		status, metadata := toUpdate.GetStatus(), toUpdate.GetMetadata()
+		// Status and Metadata are server-owned fields, and labels change only
+		// through SetActorLabels.
+		status, metadata, labels := toUpdate.GetStatus(), toUpdate.GetMetadata(), toUpdate.GetLabels()
 		// Whole-object replace: clear first, so a field the client left unset is
 		// cleared rather than kept from the stored actor.
 		// Merge cannot smuggle in unknown fields because validation already rejected them.
@@ -271,6 +282,7 @@ func (s *RPCService) UpdateActor(ctx context.Context, req *ateapipb.UpdateActorR
 		// Restore status and metadata from the server.
 		toUpdate.Status = status
 		toUpdate.Metadata = metadata
+		toUpdate.Labels = labels
 		defaults.Apply(toUpdate)
 		return nil
 	})

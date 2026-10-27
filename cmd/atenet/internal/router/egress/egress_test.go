@@ -330,6 +330,19 @@ func wantStatus(t *testing.T, err error, want envoy_type.StatusCode) {
 	}
 }
 
+// A resuming actor's app boots and may call out before its wakeup probe passes.
+func TestHandleRequestHeadersAllowsResumingActor(t *testing.T) {
+	ca := newTestCA(t, "actor-identity-ca")
+	leaf := ca.issueActorCert(t, "spiffe://substrate-actor.local/worker-for-actor/foo/bar", actorCertOptions{})
+	actor := runningActor()
+	actor.Status.State = ateapipb.ActorState_ACTOR_STATE_RESUMING
+	h := egressHandler(ca.roots(), actor, nil)
+
+	if _, err := h.HandleRequestHeaders(context.Background(), egressMetadata(xfccHeader(leaf))); err != nil {
+		t.Fatalf("HandleRequestHeaders() error = %v, want nil", err)
+	}
+}
+
 func TestHandleRequestHeadersAllowsVerifiedActor(t *testing.T) {
 	ca := newTestCA(t, "actor-identity-ca")
 	leaf := ca.issueActorCert(t, "spiffe://substrate-actor.local/worker-for-actor/foo/bar", actorCertOptions{})

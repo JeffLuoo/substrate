@@ -352,6 +352,41 @@ func TestActorResumer_Parking(t *testing.T) {
 		})
 	})
 
+	t.Run("HeldActorFailsFastWithoutParking", func(t *testing.T) {
+		synctest.Test(t, func(t *testing.T) {
+			var mu sync.Mutex
+			var calls int
+			mock := &resumerMockClient{
+				resumeFn: func(ctx context.Context, in *ateapipb.ResumeActorRequest, opts ...grpc.CallOption) (*ateapipb.ResumeActorResponse, error) {
+					mu.Lock()
+					calls++
+					mu.Unlock()
+					return nil, heldStatusErr()
+				},
+			}
+
+			resumer := NewActorResumer(mock, withParking(ParkedRequestConfig{Max: 1, Budget: 5 * time.Second}))
+			_, _, err := resumer.ResumeActor(context.Background(), testActorRef)
+			var budget *budgetExhaustedError
+			if errors.As(err, &budget) {
+				t.Errorf("a held actor must not park until the budget elapses, got %v", err)
+			}
+			if _, held := actorHold(err); !held {
+				t.Errorf("expected the ACTOR_HELD status, got %v", err)
+			}
+			re := mapResumeError(testActorRef, err)
+			var reqErr *extproc.ReqError
+			if !errors.As(re, &reqErr) || reqErr.StatusCode != int(envoy_type.StatusCode_Locked) {
+				t.Errorf("mapResumeError() = %v, want 423", re)
+			}
+			mu.Lock()
+			defer mu.Unlock()
+			if calls != 1 {
+				t.Errorf("expected exactly 1 resume attempt for a held actor, got %d", calls)
+			}
+		})
+	})
+
 	t.Run("BudgetExpiryReturnsUnderlyingCapacityError", func(t *testing.T) {
 		synctest.Test(t, func(t *testing.T) {
 			var mu sync.Mutex

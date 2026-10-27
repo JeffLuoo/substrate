@@ -166,9 +166,14 @@ func NewActorResumer(apiClient ateapipb.ControlClient, opts ...resumerOption) *A
 // parked request should ride out a blip, not fail on it with budget remaining.
 // FailedPrecondition stays retryable too: it no longer carries saturation, but
 // it does cover states a concurrent operation can move the actor out of.
+// A held actor (FailedPrecondition with ErrorInfo reason ACTOR_HELD) is never
+// retried: only removing the hold changes the outcome.
 // All other codes (NotFound, DeadlineExceeded, PermissionDenied, ...) are
 // returned to the caller so the HTTP boundary can map them with full fidelity.
 func (r *ActorResumer) retryable(err error) bool {
+	if _, held := actorHold(err); held {
+		return false
+	}
 	switch status.Code(err) {
 	case codes.Aborted:
 		return true

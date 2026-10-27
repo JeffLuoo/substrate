@@ -348,16 +348,16 @@ func TestBuildLifecycleOTLPOptionsAndEnvFallback(t *testing.T) {
 	*lifecycleEventsOTLPClientCredBundle = ""
 	*lifecycleEventsOTLPServerName = ""
 
-	t.Setenv("ATE_API_LIFECYCLE_EVENTS_OTLP_ENDPOINT", "finops.ate-finops.svc:4317")
-	t.Setenv("ATE_API_LIFECYCLE_EVENTS_OTLP_SERVER_NAME", "finops.ate-finops.svc")
+	t.Setenv("ATE_API_LIFECYCLE_EVENTS_OTLP_ENDPOINT", "cost.ate-cost.svc:4317")
+	t.Setenv("ATE_API_LIFECYCLE_EVENTS_OTLP_SERVER_NAME", "cost.ate-cost.svc")
 
 	if err := loadFlagsFromEnv(); err != nil {
 		t.Fatalf("loadFlagsFromEnv() error = %v", err)
 	}
 
 	opts := buildLifecycleOTLPOptions()
-	if opts.Endpoint != "finops.ate-finops.svc:4317" {
-		t.Errorf("Endpoint = %q, want %q", opts.Endpoint, "finops.ate-finops.svc:4317")
+	if opts.Endpoint != "cost.ate-cost.svc:4317" {
+		t.Errorf("Endpoint = %q, want %q", opts.Endpoint, "cost.ate-cost.svc:4317")
 	}
 	if opts.CAFile != "/run/servicedns.podcert.ate.dev/trust-bundle.pem" {
 		t.Errorf("CAFile = %q, want %q", opts.CAFile, "/run/servicedns.podcert.ate.dev/trust-bundle.pem")
@@ -367,8 +367,8 @@ func TestBuildLifecycleOTLPOptionsAndEnvFallback(t *testing.T) {
 	if opts.ClientCredBundle != "/run/podidentity.podcert.ate.dev/credential-bundle.pem" {
 		t.Errorf("ClientCredBundle = %q, want %q", opts.ClientCredBundle, "/run/podidentity.podcert.ate.dev/credential-bundle.pem")
 	}
-	if opts.ServerName != "finops.ate-finops.svc" {
-		t.Errorf("ServerName = %q, want %q", opts.ServerName, "finops.ate-finops.svc")
+	if opts.ServerName != "cost.ate-cost.svc" {
+		t.Errorf("ServerName = %q, want %q", opts.ServerName, "cost.ate-cost.svc")
 	}
 
 	// Explicit --lifecycle-events-otlp-client-cred-bundle overrides --atelet-client-cred-bundle,

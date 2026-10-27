@@ -97,6 +97,14 @@ func (w *ActorWorkflow) ResumeActor(ctx context.Context, actorRef resources.Acto
 	if err != nil {
 		return nil, false, err
 	}
+	// A held actor never resumes. One still awake (its suspend failed or is
+	// still running) gets a suspend in the background.
+	if holds := actor.GetStatus().GetHolds(); len(holds) > 0 {
+		if state := actor.GetStatus().GetState(); state == ateapipb.ActorState_ACTOR_STATE_RUNNING || state == ateapipb.ActorState_ACTOR_STATE_RESUMING {
+			w.enforceHoldAsync(ctx, actorRef)
+		}
+		return nil, false, actorHeldError(actorRef, holds)
+	}
 	if wasRunning = actor.GetStatus().GetState() == ateapipb.ActorState_ACTOR_STATE_RUNNING; wasRunning {
 		return actor, false, nil
 	}
@@ -111,6 +119,9 @@ func (w *ActorWorkflow) ResumeActor(ctx context.Context, actorRef resources.Acto
 	actor, actorTemplate, src, err = w.loadActorForResume(leaseCtx, actorRef)
 	if err != nil {
 		return nil, false, err
+	}
+	if holds := actor.GetStatus().GetHolds(); len(holds) > 0 {
+		return nil, false, actorHeldError(actorRef, holds)
 	}
 	if wasRunning = actor.GetStatus().GetState() == ateapipb.ActorState_ACTOR_STATE_RUNNING; wasRunning {
 		return actor, false, nil
@@ -493,6 +504,12 @@ func (w *ActorWorkflow) assignWorkerAttempt(ctx context.Context, actorRef resour
 			w.instruments.recordSchedulerAssignment(ctx, time.Since(start), outcome, poolNamespace, pool, class, err)
 		}
 	}()
+
+	// The RESUMING commit below is guarded on this actor's version, so a
+	// hold added after this check fails that commit and the retry sees it.
+	if holds := actor.GetStatus().GetHolds(); len(holds) > 0 && actor.GetStatus().GetState() == ateapipb.ActorState_ACTOR_STATE_SUSPENDED {
+		return nil, nil, actorHeldError(actorRef, holds)
+	}
 
 	constraints, err := schedulingConstraints(actor, actorTemplate)
 	if err != nil {

@@ -20,6 +20,7 @@ import (
 	"fmt"
 
 	envoy_type "github.com/envoyproxy/go-control-plane/envoy/type/v3"
+	"google.golang.org/genproto/googleapis/rpc/errdetails"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
@@ -73,6 +74,30 @@ func parkingFullErr(actorID string, retryErr error) error {
 		"actor %q unavailable: router at capacity", actorID)
 }
 
+// actorHeldReason is the google.rpc.ErrorInfo reason ateapi returns when a
+// hold refuses a resume.
+const actorHeldReason = "ACTOR_HELD"
+
+// actorHold reports whether err is ateapi refusing a resume because the actor
+// is held, and returns the ErrorInfo naming the first hold.
+func actorHold(err error) (*errdetails.ErrorInfo, bool) {
+	type grpcStatus interface{ GRPCStatus() *status.Status }
+	var gs grpcStatus
+	if !errors.As(err, &gs) {
+		return nil, false
+	}
+	st := gs.GRPCStatus()
+	if st.Code() != codes.FailedPrecondition {
+		return nil, false
+	}
+	for _, d := range st.Details() {
+		if info, ok := d.(*errdetails.ErrorInfo); ok && info.GetReason() == actorHeldReason {
+			return info, true
+		}
+	}
+	return nil, false
+}
+
 // mapResumeError translates an ActorResumer error into a client-facing
 // denial. It maps gRPC status codes to appropriate HTTP status codes and
 // short, human-readable bodies. The original error is preserved via Unwrap
@@ -106,6 +131,13 @@ func mapResumeError(actorRef resources.ActorRef, err error) error {
 	if errors.Is(err, context.DeadlineExceeded) {
 		re.StatusCode = int(envoy_type.StatusCode_GatewayTimeout)
 		re.Msg = fmt.Sprintf("actor %s request timed out", actorRef)
+		return re
+	}
+
+	// A hold is not transient, so 423 with no Retry-After rather than 503.
+	if info, held := actorHold(err); held {
+		re.StatusCode = int(envoy_type.StatusCode_Locked)
+		re.Msg = fmt.Sprintf("actor %s held by %s: %s", actorRef, info.GetMetadata()["hold"], info.GetMetadata()["reason"])
 		return re
 	}
 

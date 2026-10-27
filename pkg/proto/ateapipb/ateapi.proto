@@ -197,6 +197,27 @@ service Control {
     option (method).resource = "Actor";
   }
 
+  // Merge labels into an Actor and delete the keys named in delete_keys.
+  // Idempotent. A key with a "<prefix>/" may be restricted to the callers
+  // that own the prefix.
+  rpc SetActorLabels(SetActorLabelsRequest) returns (Actor) {
+    option (method).resource = "Actor";
+  }
+
+  // Add a hold to an Actor, or replace the hold with the same name. A held
+  // Actor is suspended if it is running or resuming, and every resume fails
+  // with FAILED_PRECONDITION and google.rpc.ErrorInfo reason ACTOR_HELD until
+  // every hold is removed.
+  rpc AddActorHold(AddActorHoldRequest) returns (Actor) {
+    option (method).resource = "Actor";
+  }
+
+  // Remove a hold from an Actor. Removing an absent hold is a no-op. Removing
+  // the last hold does not resume the Actor.
+  rpc RemoveActorHold(RemoveActorHoldRequest) returns (Actor) {
+    option (method).resource = "Actor";
+  }
+
   // Create a new Atespace. Substrate-native, stored in database.
   rpc CreateAtespace(CreateAtespaceRequest) returns (Atespace) {
     option (method).resource = "Atespace";
@@ -569,6 +590,16 @@ message Actor {
   //
   // +k8s:optional
   ActorStatus status = 7;
+
+  // labels are key/value pairs that callers outside the sandbox attach to the
+  // Actor, such as tenant or budget keys. Set at CreateActor or with
+  // SetActorLabels; UpdateActor keeps the stored labels.
+  //
+  // +k8s:optional
+  // +k8s:maxProperties=64
+  // +k8s:eachKey=+k8s:format=k8s-label-key
+  // +k8s:eachVal=+k8s:format=k8s-label-value
+  map<string, string> labels = 8;
 }
 
 // EgressPolicy is an egress policy resource nested under an Actor. An Actor has
@@ -921,6 +952,44 @@ message ActorStatus {
   // +k8s:minimum=0
   // +k8s:update=NoUnset
   int32 last_assigned_generation = 12;
+
+  // holds keep the Actor suspended. Managed only by AddActorHold and
+  // RemoveActorHold.
+  //
+  // +k8s:optional
+  // +k8s:maxItems=16
+  // +k8s:listType=map
+  // +k8s:listMapKey=name
+  repeated ActorHold holds = 13;
+}
+
+// ActorHold keeps an Actor suspended until it is removed.
+message ActorHold {
+  // name is "<prefix>/<key>", such as "agent-cost/budget". The prefix names
+  // the hold's owner.
+  //
+  // +k8s:required
+  // +k8s:format=k8s-label-key
+  string name = 1;
+
+  // reason is a human-readable explanation, returned to callers whose resume
+  // the hold refuses.
+  //
+  // +k8s:optional
+  // +k8s:maxLength=1024
+  string reason = 2;
+
+  // created_by is the principal that added the hold. Set by the server from
+  // the caller identity when empty.
+  //
+  // +k8s:optional
+  // +k8s:maxLength=1024
+  string created_by = 3;
+
+  // created_at is when the hold was first added. Set by the server.
+  //
+  // +k8s:optional
+  google.protobuf.Timestamp created_at = 4;
 }
 
 // ActorCrash describes the failure that moved an Actor to CRASHED.
@@ -2240,6 +2309,46 @@ message ListActorsRequest {
   //
   // +k8s:optional
   ListOptions options = 2;
+}
+
+message SetActorLabelsRequest {
+  // +k8s:required
+  // +k8s:subfield(atespace)=+k8s:required
+  ObjectRef actor = 1;
+
+  // labels to add or overwrite.
+  //
+  // +k8s:optional
+  // +k8s:maxProperties=64
+  // +k8s:eachKey=+k8s:format=k8s-label-key
+  // +k8s:eachVal=+k8s:format=k8s-label-value
+  map<string, string> labels = 2;
+
+  // delete_keys are label keys to remove. Absent keys are ignored.
+  //
+  // +k8s:optional
+  // +k8s:maxItems=64
+  // +k8s:eachVal=+k8s:format=k8s-label-key
+  repeated string delete_keys = 3;
+}
+
+message AddActorHoldRequest {
+  // +k8s:required
+  // +k8s:subfield(atespace)=+k8s:required
+  ObjectRef actor = 1;
+
+  // +k8s:required
+  ActorHold hold = 2;
+}
+
+message RemoveActorHoldRequest {
+  // +k8s:required
+  // +k8s:subfield(atespace)=+k8s:required
+  ObjectRef actor = 1;
+
+  // +k8s:required
+  // +k8s:format=k8s-label-key
+  string hold_name = 2;
 }
 
 message ListActorsResponse {

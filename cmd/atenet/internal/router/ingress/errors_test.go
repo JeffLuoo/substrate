@@ -20,6 +20,7 @@ import (
 	"testing"
 
 	envoy_type "github.com/envoyproxy/go-control-plane/envoy/type/v3"
+	"google.golang.org/genproto/googleapis/rpc/errdetails"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
@@ -101,6 +102,12 @@ func TestMapResumeError(t *testing.T) {
 			err:      status.Error(codes.FailedPrecondition, "no worker has room for the actor"),
 			wantCode: envoy_type.StatusCode_ServiceUnavailable,
 			wantBody: `actor team-a/ctr6 unavailable: no worker has room for the actor`,
+		},
+		{
+			name:     "ACTOR_HELD maps to 423 naming the hold",
+			err:      heldStatusErr(),
+			wantCode: envoy_type.StatusCode_Locked,
+			wantBody: `actor team-a/ctr6 held by agent-cost/budget: budget exhausted`,
 		},
 		{
 			name:     "Unavailable maps to 503",
@@ -223,4 +230,18 @@ func TestMapResumeError_IsReqError(t *testing.T) {
 	if !errors.As(err, &reqErr) {
 		t.Fatalf("errors.As(*extproc.ReqError) = false, want true; err type = %T", err)
 	}
+}
+
+// heldStatusErr is the status ateapi returns for a resume a hold refuses.
+func heldStatusErr() error {
+	st, err := status.New(codes.FailedPrecondition, "actor team-a/ctr6 held by agent-cost/budget: budget exhausted").
+		WithDetails(&errdetails.ErrorInfo{
+			Reason:   "ACTOR_HELD",
+			Domain:   "ate.dev",
+			Metadata: map[string]string{"hold": "agent-cost/budget", "reason": "budget exhausted"},
+		})
+	if err != nil {
+		panic(err)
+	}
+	return st.Err()
 }
