@@ -178,16 +178,18 @@ const (
 // restarts at zero with each activation, and is also stamped on the closing
 // lifecycle record that ends an activation. ActorBookedCPUKey (cores) and
 // ActorBookedMemoryKey (bytes) carry the resource reservation that activation
-// booked on its worker.
+// booked on its worker. WorkerPoolCapacityActorsKey is the actor slot capacity
+// of that worker, so a consumer can price one slot when nothing was booked.
 const (
-	ActorEpochKey            = attribute.Key("ate.actor.epoch")
-	ActorBookedCPUKey        = attribute.Key("ate.actor.booked.cpu")
-	ActorBookedMemoryKey     = attribute.Key("ate.actor.booked.memory")
-	StatsKindKey             = attribute.Key("ate.stats.kind")
-	StatsMemoryUsageKey      = attribute.Key("ate.stats.memory.usage")
-	StatsMemoryPeakKey       = attribute.Key("ate.stats.memory.peak")
-	StatsMemoryWorkingSetKey = attribute.Key("ate.stats.memory.working_set")
-	StatsCPUTimeKey          = attribute.Key("ate.stats.cpu.time")
+	ActorEpochKey               = attribute.Key("ate.actor.epoch")
+	ActorBookedCPUKey           = attribute.Key("ate.actor.booked.cpu")
+	ActorBookedMemoryKey        = attribute.Key("ate.actor.booked.memory")
+	WorkerPoolCapacityActorsKey = attribute.Key("ate.workerpool.capacity.actors")
+	StatsKindKey                = attribute.Key("ate.stats.kind")
+	StatsMemoryUsageKey         = attribute.Key("ate.stats.memory.usage")
+	StatsMemoryPeakKey          = attribute.Key("ate.stats.memory.peak")
+	StatsMemoryWorkingSetKey    = attribute.Key("ate.stats.memory.working_set")
+	StatsCPUTimeKey             = attribute.Key("ate.stats.cpu.time")
 )
 
 // SandboxOOMKillsKey is memory.events' oom_kill for the sandbox cgroup leaf, on

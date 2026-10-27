@@ -16,9 +16,11 @@ package controlapi
 
 import (
 	"context"
+	"log/slog"
 	"maps"
 	"strconv"
 	"testing"
+	"time"
 
 	"go.ate.dev/substrate/cmd/ateapi/internal/store"
 	"go.ate.dev/substrate/cmd/ateapi/internal/store/storetest"
@@ -26,6 +28,7 @@ import (
 	"go.ate.dev/substrate/internal/ateattr"
 	"go.ate.dev/substrate/internal/resources"
 	"go.ate.dev/substrate/pkg/proto/ateapipb"
+	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
 // TestActorStateChangeRecords drives each transition that commits a new state
@@ -367,6 +370,7 @@ func TestClosingLifecycleRecordsCarryActivationFields(t *testing.T) {
 			func(a *ateapipb.Actor) {
 				a.Status.AssignedNode = "node-1"
 				a.Status.WorkerAssignment = wireTestAssignment()
+				a.Status.WorkerAssignment.WorkerCapacityActors = 8
 			},
 		}, extraOpts...)
 		seedWorkflowActor(t, ctx, st, actorRef, tmplAtespace, tmplName, state, opts...)
@@ -396,11 +400,12 @@ func TestClosingLifecycleRecordsCarryActivationFields(t *testing.T) {
 		t.Helper()
 		wantEpoch := strconv.FormatInt(assignment.GetMetadata().GetCreateTime().AsTime().UnixNano(), 10)
 		want := map[string]string{
-			string(ateattr.ActorEpochKey):          wantEpoch,
-			string(ateattr.ActorBookedCPUKey):      "0.25",
-			string(ateattr.ActorBookedMemoryKey):   strconv.FormatInt(512<<20, 10),
-			string(ateattr.WorkerPoolNamespaceKey): poolNS,
-			string(ateattr.WorkerPoolNameKey):      poolName,
+			string(ateattr.ActorEpochKey):               wantEpoch,
+			string(ateattr.ActorBookedCPUKey):           "0.25",
+			string(ateattr.ActorBookedMemoryKey):        strconv.FormatInt(512<<20, 10),
+			string(ateattr.WorkerPoolNamespaceKey):      poolNS,
+			string(ateattr.WorkerPoolNameKey):           poolName,
+			string(ateattr.WorkerPoolCapacityActorsKey): "8",
 		}
 		for k, wv := range want {
 			if got[k] != wv {
@@ -492,4 +497,42 @@ func TestClosingLifecycleRecordsCarryActivationFields(t *testing.T) {
 		assertEvent(t, gotEvents[0], actorevent.Crashed)
 		assertActivationAttrs(t, gotEvents[0].attrs, assignment)
 	})
+}
+
+// TestActivationCloseAttrsFallbacks covers a closing record whose
+// worker_assignments row is already gone: the epoch comes from the actor's
+// activation_start_time, and capacity is omitted when the Worker reported none.
+func TestActivationCloseAttrsFallbacks(t *testing.T) {
+	start := time.Unix(1_700_000_000, 42).UTC()
+	attrsOf := func(attrs []slog.Attr) map[string]string {
+		got := map[string]string{}
+		for _, a := range attrs {
+			got[a.Key] = a.Value.String()
+		}
+		return got
+	}
+
+	got := attrsOf(activationCloseAttrs(&ateapipb.WorkerAssignment{
+		WorkerNamespace:      "worker-ns",
+		WorkerPool:           "pool",
+		ActivationStartTime:  timestamppb.New(start),
+		WorkerCapacityActors: 4,
+	}, nil, nil))
+	want := map[string]string{
+		string(ateattr.ActorEpochKey):               strconv.FormatInt(start.UnixNano(), 10),
+		string(ateattr.WorkerPoolNamespaceKey):      "worker-ns",
+		string(ateattr.WorkerPoolNameKey):           "pool",
+		string(ateattr.WorkerPoolCapacityActorsKey): "4",
+	}
+	if !maps.Equal(got, want) {
+		t.Errorf("attrs = %v, want %v", got, want)
+	}
+
+	got = attrsOf(activationCloseAttrs(&ateapipb.WorkerAssignment{WorkerNamespace: "worker-ns", WorkerPool: "pool"}, nil, nil))
+	if _, ok := got[string(ateattr.WorkerPoolCapacityActorsKey)]; ok {
+		t.Errorf("capacity attr present with no reported capacity: %v", got)
+	}
+	if _, ok := got[string(ateattr.ActorEpochKey)]; ok {
+		t.Errorf("epoch attr present with no start time: %v", got)
+	}
 }

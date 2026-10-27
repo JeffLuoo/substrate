@@ -1015,6 +1015,21 @@ message WorkerAssignment {
   // +k8s:maxLength=2048
   // +k8s:customValidation # a SPIFFE ID
   string worker_spiffe_id = 10;
+
+  // activation_start_time is when the Actor was bound to the Worker: the
+  // create time of the worker assignment, which ate.actor.epoch reports in
+  // unix nanoseconds on the record that closes the activation.
+  //
+  // +k8s:optional
+  google.protobuf.Timestamp activation_start_time = 11;
+
+  // worker_capacity_actors is the Worker's actor slot capacity when the Actor
+  // was placed on it, copied from Worker.status.capacity.actors. 0 if the
+  // Worker had not reported one.
+  //
+  // +k8s:optional
+  // +k8s:minimum=0
+  int32 worker_capacity_actors = 12;
 }
 
 // TagStatus is the server-owned state of a Tag.

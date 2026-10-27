@@ -103,14 +103,19 @@ func logActorState(ctx context.Context, actor *ateapipb.Actor, opName, state str
 // activationCloseAttrs builds the conditional attributes for a closing
 // lifecycle record (suspended, reverted, deleted, or crashed) that releases an
 // active worker assignment: the activation start time (epoch), the booked CPU
-// and memory reservations, and the worker pool identity. Returns nil when the
-// transition did not release a worker assignment.
+// and memory reservations, and the worker pool identity and actor slot
+// capacity. Returns nil when the transition did not release a worker
+// assignment.
 func activationCloseAttrs(workerAssignment *ateapipb.WorkerAssignment, actorAssignment *ateapipb.ActorAssignment, tmpl *ateapipb.ActorTemplate) []slog.Attr {
 	if workerAssignment == nil && actorAssignment == nil {
 		return nil
 	}
 	var attrs []slog.Attr
-	if ct := actorAssignment.GetMetadata().GetCreateTime(); ct != nil && ct.IsValid() && !ct.AsTime().IsZero() {
+	ct := actorAssignment.GetMetadata().GetCreateTime()
+	if ct == nil {
+		ct = workerAssignment.GetActivationStartTime()
+	}
+	if ct != nil && ct.IsValid() && !ct.AsTime().IsZero() {
 		attrs = append(attrs, slog.Int64(string(ateattr.ActorEpochKey), ct.AsTime().UnixNano()))
 	}
 	res := actorAssignment.GetResources()
@@ -129,6 +134,9 @@ func activationCloseAttrs(workerAssignment *ateapipb.WorkerAssignment, actorAssi
 		attrs = append(attrs,
 			slog.String(string(ateattr.WorkerPoolNamespaceKey), ns),
 			slog.String(string(ateattr.WorkerPoolNameKey), pool))
+	}
+	if slots := workerAssignment.GetWorkerCapacityActors(); slots > 0 {
+		attrs = append(attrs, slog.Int64(string(ateattr.WorkerPoolCapacityActorsKey), int64(slots)))
 	}
 	return attrs
 }

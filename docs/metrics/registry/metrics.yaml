@@ -106,6 +106,18 @@ groups:
           assignment. Taken from the worker assignment's admitted memory limit,
           or the ActorTemplate's memory limit when the assignment carries none.
         examples: [536870912]
+      - id: ate.workerpool.capacity.actors
+        stability: development
+        type: int
+        brief: >
+          The number of actor slots on the worker that hosted the activation
+          being closed.
+        note: >
+          Logs only, on the closing lifecycle record that releases a worker
+          assignment. Copied from the Worker's reported actor capacity when the
+          actor was placed. A consumer divides the node price by it to price
+          one slot when the activation booked no CPU or memory.
+        examples: [10]
       - id: ate.actor.state
         stability: development
         brief: The state the actor is in now.

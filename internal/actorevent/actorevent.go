@@ -96,6 +96,7 @@ var activationCloseKeys = []string{
 	string(ateattr.ActorBookedMemoryKey),
 	string(ateattr.WorkerPoolNamespaceKey),
 	string(ateattr.WorkerPoolNameKey),
+	string(ateattr.WorkerPoolCapacityActorsKey),
 }
 
 // Three names. A crash is its own because it has a different severity; there

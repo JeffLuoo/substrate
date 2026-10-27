@@ -91,6 +91,11 @@ groups:
           conditionally_required: >
             When the transition closes an active worker assignment that names a
             WorkerPool.
+      - ref: ate.workerpool.capacity.actors
+        requirement_level:
+          conditionally_required: >
+            When the transition closes an active worker assignment whose Worker
+            reported an actor slot capacity.
 
   - id: event.ate.actor.crashed
     type: event
@@ -149,6 +154,11 @@ groups:
           conditionally_required: >
             When the crash closes an active worker assignment that names a
             WorkerPool.
+      - ref: ate.workerpool.capacity.actors
+        requirement_level:
+          conditionally_required: >
+            When the crash closes an active worker assignment whose Worker
+            reported an actor slot capacity.
 
   - id: event.ate.actor.usage_sampled
     type: event

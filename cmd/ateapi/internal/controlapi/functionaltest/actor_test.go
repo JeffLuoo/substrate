@@ -3087,11 +3087,17 @@ func TestResumeActor(t *testing.T) {
 				WorkerPodUid:    podUID,
 				WorkerPodIps:    []string{"127.0.0.1"},
 				NodeName:        "node1",
+				// The fake worker pod reports one actor slot.
+				WorkerCapacityActors: 1,
 			},
 		},
 	}
-	if diff := cmp.Diff(want, getResp, protocmp.Transform(), ignoreUID, ignoreVersion, ignoreTimestamps); diff != "" {
+	if diff := cmp.Diff(want, getResp, protocmp.Transform(), ignoreUID, ignoreVersion, ignoreTimestamps,
+		protocmp.IgnoreFields(&ateapipb.WorkerAssignment{}, "activation_start_time")); diff != "" {
 		t.Errorf("GetActor response mismatch (-want +got):\n%s", diff)
+	}
+	if start := getResp.GetStatus().GetWorkerAssignment().GetActivationStartTime(); !start.IsValid() || start.AsTime().IsZero() {
+		t.Errorf("GetActor activation_start_time = %v, want the assignment's create time", start)
 	}
 
 	// Verify that the worker record also has the assigned actor details

@@ -615,4 +615,14 @@ func TestAssignWorkerAttempt_StampsWorkerEpoch(t *testing.T) {
 	if got := assignment.GetWorkerEpoch(); got != 2 {
 		t.Errorf("assignment worker_epoch = %d, want 2", got)
 	}
+	// Get/ListActors report the activation start and slot capacity that the
+	// closing record later carries as ate.actor.epoch and
+	// ate.workerpool.capacity.actors.
+	wa := stored.GetStatus().GetWorkerAssignment()
+	if got, want := wa.GetActivationStartTime().AsTime(), assignment.GetMetadata().GetCreateTime().AsTime(); !got.Equal(want) || got.IsZero() {
+		t.Errorf("actor activation_start_time = %v, want assignment create time %v", got, want)
+	}
+	if got := wa.GetWorkerCapacityActors(); got != 1 {
+		t.Errorf("actor worker_capacity_actors = %d, want 1", got)
+	}
 }

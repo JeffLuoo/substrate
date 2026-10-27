@@ -565,6 +565,9 @@ func (w *ActorWorkflow) assignWorkerAttempt(ctx context.Context, actorRef resour
 	// The cached Worker may predate a raised epoch; the bind read it under the
 	// Worker's row lock.
 	newAssignment.WorkerEpoch = assignment.GetWorkerEpoch()
+	// The bind stamped the assignment's create time; a rebind keeps the
+	// original one, so the activation start matches ate.actor.epoch at close.
+	newAssignment.ActivationStartTime = proto.CloneOf(assignment.GetMetadata().GetCreateTime())
 	storedActor, err := w.store.UpdateActor(ctx, actorRef, store.PreconditionFrom(actor), func(toUpdate *ateapipb.Actor) error {
 		toUpdate.Status.State = ateapipb.ActorState_ACTOR_STATE_RESUMING
 		toUpdate.Status.WorkerAssignment = newAssignment
@@ -611,6 +614,9 @@ func workerAssignmentFrom(w *ateapipb.Worker, snapRuntime hardware.Requirement) 
 		WorkerPodIps:    slices.Clone(w.GetIps()),
 		NodeName:        w.GetNodeName(),
 		WorkerSpiffeId:  w.GetWorkerSpiffeId(),
+		// Copied so a closing record can price one slot without fetching the
+		// Worker, which may already be gone.
+		WorkerCapacityActors: w.GetStatus().GetCapacity().GetActors(),
 		// The runtime the actor is started or restored under. Snapshots taken
 		// during this assignment are stamped with it, so a worker that later
 		// changes its default does not relabel state captured on the old one.

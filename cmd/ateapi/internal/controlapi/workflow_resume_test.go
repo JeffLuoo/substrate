@@ -2704,3 +2704,12 @@ func TestWorkerAssignmentFromCopiesSPIFFEID(t *testing.T) {
 		t.Errorf("worker SPIFFE ID = %q, want %q", got.GetWorkerSpiffeId(), id)
 	}
 }
+
+func TestWorkerAssignmentFromCopiesCapacityActors(t *testing.T) {
+	got := workerAssignmentFrom(&ateapipb.Worker{
+		Status: &ateapipb.WorkerStatus{Capacity: &ateapipb.WorkerResources{Actors: 12}},
+	}, hardware.Requirement{})
+	if got.GetWorkerCapacityActors() != 12 {
+		t.Errorf("worker capacity actors = %d, want 12", got.GetWorkerCapacityActors())
+	}
+}
