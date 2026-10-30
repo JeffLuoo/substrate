@@ -46,11 +46,16 @@ from typing import IO, Any, TextIO
 from cluster_facts import (
     EMPTY_FACTS,
     append_trial_summary,
+    diff_worker_pods,
     get_cluster_hardware_facts,
+    read_evicted_pods,
+    snapshot_worker_pods,
 )
 from common.boomer_config import build_config_json
 from server_telemetry import extract_and_record_server_telemetry
 from phase_breakdown import append_phase_breakdown
+from ladder_steps import append_ladder_steps
+from turnover_window import append_turnover_window, fill_done_ts
 
 # Path inside the locust image to the boomer-worker binary baked in by
 # benchmarking/locust/Dockerfile.
@@ -154,7 +159,8 @@ def parse_args() -> argparse.Namespace:
         default=True,
         help=(
             "Read node capacity and worker pod count from the Kubernetes API "
-            "after the run to derive density frontiers. Pass "
+            "after the run to derive density frontiers, and worker pod restarts "
+            "and evictions around it for oom_events. Pass "
             "--no-cluster-facts to skip Kubernetes API discovery"
         ),
     )
@@ -517,6 +523,32 @@ def collect_cluster_facts(
     return get_cluster_hardware_facts(logs)
 
 
+def read_worker_pods(
+    args: argparse.Namespace, logs: TextIO
+) -> dict[str, dict[str, Any]] | None:
+    """Worker pod state, or None when discovery is off or the read fails."""
+    if not args.cluster_facts:
+        return None
+    try:
+        return snapshot_worker_pods(logs)
+    except Exception as e:
+        tee(logs, f"Warning: Failed to read worker pods: {e}")
+        return None
+
+
+def read_evictions(
+    args: argparse.Namespace, since_ts: int, logs: TextIO
+) -> set[str] | None:
+    """Pods evicted since since_ts, or None when discovery is off or it fails."""
+    if not args.cluster_facts:
+        return None
+    try:
+        return read_evicted_pods(since_ts, logs)
+    except Exception as e:
+        tee(logs, f"Warning: Failed to read evictions: {e}")
+        return None
+
+
 def main() -> None:
     args = parse_args()
     now = datetime.now(timezone.utc)
@@ -547,8 +579,13 @@ def main() -> None:
         traces.write("\t".join(TRACE_COLUMNS) + "\n")
         traces.flush()
         log_run_config(args, prefix, work_dir, logs)
+        # Worker pods around the run, for OOMKilled restarts and evictions.
+        pods_before = read_worker_pods(args, logs)
         exit_code = run_test(args, csv_prefix, logs, traces)
         run_end_ts = int(datetime.now(timezone.utc).timestamp())
+        pods_after = read_worker_pods(args, logs)
+        # Right after the run, as Evicted events expire after about 1h.
+        evicted_uids = read_evictions(args, run_ts, logs)
 
         stats_generated = False
         if stats_csv.exists():
@@ -602,6 +639,18 @@ def main() -> None:
             except Exception as e:
                 tee(logs, f"Warning: Failed to record cluster facts: {e}")
 
+        # A turnover run is measured from the end of its fill, past the
+        # registration of its fleet: the server telemetry's steady window and
+        # the turnover_window row start there. Other runs have no such line.
+        turnover_start = None
+        try:
+            with open(logs_path, errors="replace") as f:
+                turnover_start = fill_done_ts(f)
+            if turnover_start is not None:
+                tee(logs, f"Turnover fill done at {turnover_start}; measuring the turnover from there")
+        except Exception as e:
+            tee(logs, f"Warning: Failed to read the turnover start: {e}")
+
         # Server telemetry is a Prometheus time-window query, so it runs
         # either way. A run too loaded to write a CSV is the one its
         # bin-packing, PSI and snapshot numbers matter most for.
@@ -618,9 +667,34 @@ def main() -> None:
                 test_name=args.name,
                 logs=logs,
                 lag_s=args.atelet_lag_s,
+                worker_pods=diff_worker_pods(pods_before, pods_after, evicted_uids),
+                steady_not_before=turnover_start,
             )
         except Exception as e:
             tee(logs, f"Warning: Failed to harvest server telemetry: {e}")
+
+        # Per-step rows for a ladder run, from the same Prometheus. Placed
+        # after the server telemetry, whose wait lets the last step's samples
+        # be scraped.
+        try:
+            n = append_ladder_steps(
+                jsonl_path, logs_path, args.prometheus_url, data_ts,
+                args.tag, args.name, logs,
+            )
+            if n:
+                tee(logs, f"Appended {n} ladder step rows to {jsonl_path}")
+        except Exception as e:
+            tee(logs, f"Warning: Failed to summarize ladder steps: {e}")
+
+        if turnover_start is not None:
+            try:
+                if append_turnover_window(
+                    jsonl_path, turnover_start, stats_history_csv, data_ts,
+                    args.tag, args.name, logs,
+                ):
+                    tee(logs, f"Appended the turnover_window row to {jsonl_path}")
+            except Exception as e:
+                tee(logs, f"Warning: Failed to summarize the turnover window: {e}")
 
         # The phase breakdown is additive too. It reads the node logs now,
         # while the pods still exist: the orchestrator deletes them as soon
@@ -658,8 +732,6 @@ def main() -> None:
         (work_dir / f"{args.name}_failures.csv", "failures.csv"),
         (work_dir / f"{args.name}_stats_history.csv", "stats_history.csv"),
         (server_summary_json, "server_summary.json"),
-        # TODO: remove after data migration
-        (jsonl_path, f"{args.name}.jsonl"),
     ]
     for src, basename in files:
         if not src.exists():

@@ -15,7 +15,7 @@
 package resources
 
 import (
-	"encoding/hex"
+	"errors"
 	"fmt"
 	"net"
 	"net/netip"
@@ -24,6 +24,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -31,12 +32,12 @@ import (
 	"go.ate.dev/substrate/internal/apierror"
 	"go.ate.dev/substrate/internal/nodepath"
 	"go.ate.dev/substrate/internal/proto/ateworkerpb"
+	"go.ate.dev/substrate/internal/protoredact"
 	"go.ate.dev/substrate/internal/volumepath"
 	"go.ate.dev/substrate/pkg/sandboxclass"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/proto"
-	"k8s.io/apimachinery/pkg/api/resource"
 	"k8s.io/apimachinery/pkg/api/validate/content"
 	"k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/apimachinery/pkg/util/validation/field"
@@ -48,13 +49,67 @@ import (
 // TODO: Delete once atelet's WorkerSupport server returns apierrors, and use
 // ToAPIError instead.
 func ToGRPCStatusError(errs field.ErrorList) error {
-	return status.Error(codes.InvalidArgument, errs.ToAggregate().Error())
+	return status.Error(codes.InvalidArgument, validationMessage(errs))
 }
 
 // ToAPIError turns validation errors into the InvalidArgument error an RPC
-// handler responds with. Callers check len(errs) > 0 first.
+// handler responds with, or nil if errs is empty.
 func ToAPIError(errs field.ErrorList) error {
-	return apierror.InvalidArgument("%v", errs.ToAggregate())
+	if len(errs) == 0 {
+		return nil
+	}
+	return apierror.InvalidArgument("%s", validationMessage(errs))
+}
+
+// ToInternalError turns validation errors on an object the server built, such
+// as the final value about to be stored, into an Internal error. Callers check
+// len(errs) > 0 first.
+func ToInternalError(errs field.ErrorList) error {
+	return apierror.Internal("%s", validationMessage(errs))
+}
+
+// validationMessage renders errs as error text, with the debug_redact fields of
+// proto bad values masked and nil entries dropped.
+func validationMessage(errs field.ErrorList) string {
+	agg := redactBadValues(errs).ToAggregate()
+	if agg == nil {
+		return "validation failed"
+	}
+	return agg.Error()
+}
+
+// redactBadValues masks the debug_redact fields of any proto message an error
+// carries as its bad value. A duplicate entry error carries the whole entry
+// (an EnvVar with its value), and the error text renders it as JSON; the RPC
+// interceptors log that text as a string, which the logging handler's proto
+// redaction cannot see into. Nil entries are dropped, as rendering one panics.
+// errs is left unmodified.
+func redactBadValues(errs field.ErrorList) field.ErrorList {
+	var out field.ErrorList
+	copied := false
+	for i, e := range errs {
+		r := e
+		if e != nil {
+			if m, ok := e.BadValue.(proto.Message); ok {
+				if masked, changed := protoredact.Redacted(m); changed {
+					c := *e
+					c.BadValue = masked
+					r = &c
+				}
+			}
+		}
+		if !copied && (e == nil || r != e) {
+			out = slices.Clone(errs[:i])
+			copied = true
+		}
+		if copied && r != nil {
+			out = append(out, r)
+		}
+	}
+	if !copied {
+		return errs
+	}
+	return out
 }
 
 // DeepEqual compares two values of any type, using proto.Equal if both are
@@ -107,11 +162,12 @@ func ValidateWorkerPodUID(workerPodUID string) error {
 	return nil
 }
 
-// ValidateActorDirs checks that every directory atelet passes to worker is
-// set, absolute and clean.
+// ValidateActorDirs checks that every directory atelet passes to the worker
+// is absolute and clean. Presence is enforced by the tags on the message; it
+// backs the ateworkerpb.ActorDirs custom validation hook.
 func ValidateActorDirs(actorDirs *ateworkerpb.ActorDirs, fldPath *field.Path) field.ErrorList {
 	if actorDirs == nil {
-		return field.ErrorList{field.Required(fldPath, "")}
+		return nil
 	}
 	var errs field.ErrorList
 	for _, actorDir := range []struct{ name, path string }{
@@ -158,7 +214,7 @@ func ValidateSandboxClass(fldPath *field.Path, value string) field.ErrorList {
 
 func validateAbsDir(dir string, fldPath *field.Path) field.ErrorList {
 	if dir == "" {
-		return field.ErrorList{field.Required(fldPath, "")}
+		return nil // required is enforced by tags
 	}
 	if !filepath.IsAbs(dir) || filepath.Clean(dir) != dir {
 		return field.ErrorList{field.Invalid(fldPath, dir, "must be an absolute, clean path")}
@@ -206,58 +262,80 @@ func ValidateSandboxAssetsDir(actorUID, dir string, fldPath *field.Path) field.E
 	return nil
 }
 
-// ValidateAssetHash ensures a sandbox asset's SHA-256 hash is exactly 64 hex
-// characters before it becomes the asset's cache key, so a malformed hash is
-// rejected as the request's fault rather than failing deep inside the cache.
-func ValidateAssetHash(sha256Hash string) error {
-	if len(sha256Hash) != 64 {
-		return fmt.Errorf("invalid asset sha256 hash: want 64 hex chars, got %d", len(sha256Hash))
+// snapshotLocationSegmentRE matches a path segment of a snapshot location.
+// Characters outside it, such as dots, white space and '%', are ones an
+// object-storage backend may trim, fold or decode, which could turn a segment
+// into another name.
+var snapshotLocationSegmentRE = regexp.MustCompile(`^[A-Za-z0-9_-]+$`)
+
+// ValidateSnapshotLocation checks ate-api-server's --snapshot-location, an
+// ActorTemplate's snapshotConfig.storageLocation on create, and the location a
+// tag is created under. The location must be a URI with a bucket, so a bad
+// location fails fast instead of deep inside an object-storage call. It does
+// not restrict the scheme or the bucket: the storage layer uses only the host
+// (bucket) and path, and which schemes are acceptable is a storage-backend
+// policy.
+//
+// Each path segment must match snapshotLocationSegmentRE and must not be
+// "atespaces" in any letter case, so a location cannot sit inside the
+// <location>/atespaces/... prefix another location builds.
+func ValidateSnapshotLocation(location string) error {
+	u, err := parseStorageURI(location)
+	if err != nil {
+		return fmt.Errorf("invalid snapshot location %q: %w", location, err)
 	}
-	// Same decoder atelet's digest comparison uses.
-	if _, err := hex.DecodeString(sha256Hash); err != nil {
-		return fmt.Errorf("invalid asset sha256 hash %q: must be hex", sha256Hash)
+	path := u.EscapedPath()
+	if path == "" || path == "/" {
+		return nil
+	}
+	path = strings.TrimSuffix(strings.TrimPrefix(path, "/"), "/")
+	for segment := range strings.SplitSeq(path, "/") {
+		if segment == "" {
+			return fmt.Errorf("invalid snapshot location %q: must not contain an empty path segment", location)
+		}
+		if !snapshotLocationSegmentRE.MatchString(segment) {
+			return fmt.Errorf("invalid snapshot location %q: path segment %q must contain only ASCII letters, digits, '_' and '-'", location, segment)
+		}
+		if strings.EqualFold(segment, atespacesPathSegment) {
+			return fmt.Errorf("invalid snapshot location %q: must not contain an %q path segment; snapshots are stored under <location>/%s/", location, atespacesPathSegment, atespacesPathSegment)
+		}
 	}
 	return nil
 }
 
-// ValidateSnapshotLocation ensures an ActorTemplate's snapshotConfig.location
-// is a well-formed URI with a bucket, so a bad location fails fast instead of
-// deep inside an object-storage call. It deliberately does not restrict the
-// scheme: the storage layer only uses the host (bucket) and path, and which
-// schemes are acceptable is a storage-backend policy, not a per-RPC one.
-//
-// This validates the base that many snapshots share, not any one snapshot's
-// URI; SnapshotURI is the type for the latter, and it applies this check when
-// it is built.
-func ValidateSnapshotLocation(location string) error {
-	u, err := url.Parse(location)
+// parseStorageURI checks the shape every snapshot location, owner prefix and
+// snapshot URI shares: a host (the bucket) and a path that appending names to
+// cannot redirect. It does not check the scheme, which may be empty
+// ("//bucket/path"). Errors are bare causes for the caller to wrap.
+func parseStorageURI(uri string) (*url.URL, error) {
+	u, err := url.Parse(uri)
 	if err != nil {
-		return fmt.Errorf("invalid snapshot location %q: %v", location, err)
+		return nil, err
 	}
 	if u.Host == "" {
-		return fmt.Errorf("invalid snapshot location %q: missing bucket", location)
+		return nil, errors.New("missing bucket")
 	}
 	// Snapshot and object names are appended to the location by string
 	// concatenation. A query, fragment, or userinfo component would swallow
 	// the appended name when the result is re-parsed (the storage layer uses
 	// only host and path), silently redirecting the upload/download to a
-	// different object.
-	if u.Opaque != "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" {
-		return fmt.Errorf("invalid snapshot location %q: must contain only a scheme, bucket, and path", location)
+	// different object. A trailing '?' sets ForceQuery with an empty RawQuery.
+	if u.Opaque != "" || u.User != nil || u.RawQuery != "" || u.ForceQuery || u.Fragment != "" {
+		return nil, errors.New("must contain only a scheme, bucket, and path")
 	}
 	// url.JoinPath cleans dot segments, and some backends trim spaces from
 	// segments (or windows, trailing dots) and treat '\' as a separator, so
 	// these could move snapshots outside of the location, e.g. into another
 	// atespace's prefix
 	if strings.Contains(u.Path, `\`) {
-		return fmt.Errorf(`invalid snapshot location %q: must not contain '\'`, location)
+		return nil, errors.New(`must not contain '\'`)
 	}
 	for segment := range strings.SplitSeq(u.Path, "/") {
 		if segment != "" && strings.Trim(segment, ". ") == "" {
-			return fmt.Errorf("invalid snapshot location %q: must not contain path segments of only '.' and ' '", location)
+			return nil, errors.New("must not contain path segments of only '.' and ' '")
 		}
 	}
-	return nil
+	return u, nil
 }
 
 // ValidateIP checks that the given string is a valid IP address, is not an
@@ -307,45 +385,6 @@ func ValidateUUID(uuid string, fldPath *field.Path) field.ErrorList {
 		}
 	}
 	return nil
-}
-
-// cpuLimitMax bounds cpu limits. The wire carries ceil(cores × 1000)
-// millicores and caps it at 999999 (strictly below 1000 cores), so a limit
-// above 999.999 cores rounds up out of range.
-var cpuLimitMax = resource.MustParse("999.999")
-
-// memoryLimitMax bounds memory limits at what the wire's int64 byte count
-// holds; resource.Quantity.Value wraps silently past it.
-var memoryLimitMax = resource.MustParse("9223372036854775807")
-
-// ValidateLimit validates one resource limit entry at fldPath: only cpu and
-// memory are supported, the quantity must be greater than zero, and it must
-// fit the scalars the control plane converts it to (cpuLimitMax and
-// memoryLimitMax). The bounds compare Quantities rather than the converted
-// integers, which wrap for very large values. An empty quantity is left to
-// the required tag.
-func ValidateLimit(fldPath *field.Path, name, quantity string) field.ErrorList {
-	if name != ResourceCPU && name != ResourceMemory {
-		return field.ErrorList{field.NotSupported(fldPath.Child("name"), name, []string{ResourceCPU, ResourceMemory})}
-	}
-	if quantity == "" {
-		return nil
-	}
-	q, err := resource.ParseQuantity(quantity)
-	if err != nil {
-		return field.ErrorList{field.Invalid(fldPath.Child("quantity"), quantity, fmt.Sprintf("must be a Kubernetes resource quantity: %v", err))}
-	}
-	var errs field.ErrorList
-	if q.Sign() <= 0 {
-		errs = append(errs, field.Invalid(fldPath.Child("quantity"), quantity, "must be greater than zero"))
-	}
-	switch {
-	case name == ResourceCPU && q.Cmp(cpuLimitMax) > 0:
-		errs = append(errs, field.Invalid(fldPath.Child("quantity"), quantity, "cpu limit must be at most 999.999 cores"))
-	case name == ResourceMemory && q.Cmp(memoryLimitMax) > 0:
-		errs = append(errs, field.Invalid(fldPath.Child("quantity"), quantity, "memory limit must be at most 9223372036854775807 bytes"))
-	}
-	return errs
 }
 
 // ValidatePinnedImage requires a well-formed OCI image reference pinned by
@@ -425,6 +464,12 @@ func ValidateMountPath(fldPath *field.Path, p string) field.ErrorList {
 // fldPath[i].mount_path. Identical paths are left to the list-key uniqueness
 // check.
 func ValidateNestedMountPaths(fldPath *field.Path, paths []string) field.ErrorList {
+	return ValidateNestedMountPathsAt(paths, func(i int) *field.Path { return fldPath.Index(i).Child("mount_path") })
+}
+
+// ValidateNestedMountPathsAt is ValidateNestedMountPaths for paths gathered
+// from more than one list: at(i) is where paths[i] is reported.
+func ValidateNestedMountPathsAt(paths []string, at func(i int) *field.Path) field.ErrorList {
 	var errs field.ErrorList
 	for i, path := range paths {
 		if path == "" {
@@ -435,7 +480,7 @@ func ValidateNestedMountPaths(fldPath *field.Path, paths []string) field.ErrorLi
 				continue
 			}
 			if strings.HasPrefix(path, prior+"/") || strings.HasPrefix(prior, path+"/") {
-				errs = append(errs, field.Invalid(fldPath.Index(i).Child("mount_path"), path,
+				errs = append(errs, field.Invalid(at(i), path,
 					fmt.Sprintf("must not nest under or over another mount (%q)", prior)))
 			}
 		}

@@ -22,18 +22,15 @@ import (
 	"strings"
 
 	"github.com/spf13/pflag"
+	"github.com/spiffe/go-spiffe/v2/spiffeid"
 
 	"go.ate.dev/substrate/cmd/ate-setup/internal/images"
+	"go.ate.dev/substrate/internal/actoridjwt"
 	"go.ate.dev/substrate/internal/installdefaults"
-	"go.ate.dev/substrate/internal/oidcdiscovery"
 	"go.ate.dev/substrate/internal/preview"
 )
 
 // ConfigPathEnv names the configuration document when --config is not given.
-//
-// It exists so the file channel crosses hack/install-ate.sh, which forwards
-// only a fixed set of flags but passes the whole environment to the child
-// process. Every other setting reaches ate-setup that way already.
 const ConfigPathEnv = "ATE_CONFIG"
 
 // LoadOptions carries the inputs that select where configuration comes from,
@@ -84,11 +81,9 @@ func LoadFlags(fs *pflag.FlagSet, o LoadOptions) (*Config, error) {
 
 // configPathFrom picks the configuration document, flag over environment.
 //
-// A relative path resolves against the working directory, which is the
-// repository root when the shell installer invoked this: it does cd "$ROOT"
-// before running the binary. ParseFile reports the absolute path it tried, so
-// a path that meant something else from the caller's directory is visible in
-// the error rather than silently missing.
+// A relative path resolves against the working directory. ParseFile reports
+// the absolute path it tried, so a path that meant something else from the
+// caller's directory is visible in the error rather than silently missing.
 func configPathFrom(o LoadOptions) string {
 	if o.ConfigPath != "" {
 		return o.ConfigPath
@@ -142,9 +137,8 @@ func resolveKind(fs *pflag.FlagSet, file *File, env map[string]string) bool {
 
 // mergeDevEnv layers .ate-dev-env.sh underneath the process environment.
 //
-// Sourcing is skipped for Kind installs the same way the shell kind installer
-// exports NO_DEV_ENV: the GKE-shaped variables in a developer's file would
-// otherwise point a local install at a cloud project.
+// Sourcing is skipped for Kind installs: the GKE-shaped variables in a
+// developer's file would otherwise point a local install at a cloud project.
 func mergeDevEnv(root string, env map[string]string, noDevEnv, kind bool) error {
 	if noDevEnv || kind || os.Getenv("NO_DEV_ENV") != "" {
 		return nil
@@ -211,8 +205,8 @@ func buildConfig(root string, env map[string]string, r *Resolved) (*Config, erro
 	}
 	// kubectl-ate, ate-setup's demo steps and the e2e clients fall back to
 	// tokens minted from the client ServiceAccount, so making it the default
-	// bootstrap owner keeps them working with authorization on. The deploy
-	// warns whenever it is a bootstrap owner.
+	// bootstrap owner keeps them working. The deploy warns whenever it is a
+	// bootstrap owner.
 	bootstrapOwners := r.String("ateapi.authz.bootstrapOwners")
 	if bootstrapOwners == "" {
 		bootstrapOwners = installdefaults.ClientPrincipal(r.String("namespace"))
@@ -229,10 +223,12 @@ func buildConfig(root string, env map[string]string, r *Resolved) (*Config, erro
 		ClusterLocation:   r.String("gcp.clusterLocation"),
 		ExpectedJWTIssuer: r.String("ateapi.expectedJWTIssuer"),
 
-		APIExperimentalEnableAuthz: r.Bool("ateapi.authz.enabled"),
-		APIAuthzBootstrapOwners:    bootstrapOwners,
+		APIAuthzBootstrapOwners:     bootstrapOwners,
+		EgressGatewayExtraSPIFFEIDs: splitList(r.String("ateapi.authz.egressGatewayExtraSPIFFEIDs")),
 
 		BucketName:         r.String("storage.bucketName"),
+		SnapshotLocation:   r.String("storage.snapshotLocation"),
+		TransferGSAName:    r.String("storage.transferGSAName"),
 		KODockerRepo:       r.String("ko.dockerRepo"),
 		KODefaultPlatforms: r.String("ko.defaultPlatforms"),
 		ActorJWTAlgorithm:  r.String("actorJWT.algorithm"),
@@ -271,9 +267,10 @@ func buildConfig(root string, env map[string]string, r *Resolved) (*Config, erro
 		PodcertWorkersPerSigner:            podcertWorkers,
 		EnvoyConcurrency:                   envoyConcurrency,
 		ClusterSize:                        r.String("clusterSize"),
-		CordonControlPlane:                 r.Bool("cordonControlPlane"),
+		CordonSystemInfraComponents:        r.Bool("cordonSystemInfraComponents"),
 		FakeDataPlane:                      r.Bool("fakeDataPlane.enabled"),
-		IngressAuthMode:                    r.String("ingressAuthMode"),
+		E2ETuning:                          r.Bool("e2e.tuning"),
+		IngressAllowedSPIFFEIDs:            splitList(r.String("ingressAllowedSPIFFEIDs")),
 		AdditionalEgressExtprocService:     r.String("atenet.egress.additionalExtprocService"),
 		AdditionalEgressExtprocFiltersFile: r.String("atenet.egress.additionalExtprocFiltersFile"),
 		CredentialProviderJSON:             r.String("atenet.egress.credentialProvider"),
@@ -333,11 +330,12 @@ func splitKubeconfig(r *Resolved) (explicitPath, scriptValue string) {
 // kindCluster.enabled -- which replays to whatever the defaults happen to be
 // on the next machine and the next release, not to the install it recorded.
 func applyKindDefaults(r *Resolved) {
-	// A Kind cluster has no GCP project, so the coordinates are cleared even
-	// when the developer environment named them. Only when something did name
-	// them: clearing an already-empty setting would report a value as set by
-	// the profile when the profile changed nothing.
-	for _, key := range []string{"gcp.projectID", "gcp.clusterLocation"} {
+	// A Kind cluster has no GCP project, so the coordinates and the transfer
+	// service account are cleared even when the developer environment named
+	// them. Only when something did name them: clearing an already-empty
+	// setting would report a value as set by the profile when the profile
+	// changed nothing.
+	for _, key := range []string{"gcp.projectID", "gcp.clusterLocation", "storage.transferGSAName"} {
 		if r.String(key) != "" {
 			r.set(key, "", OriginKindProfile)
 		}
@@ -358,6 +356,11 @@ func applyKindDefaults(r *Resolved) {
 	}
 	if !namedExplicitly(r, "storage.bucketName") {
 		r.set("storage.bucketName", "ate-snapshots", OriginKindProfile)
+	}
+	// Follows the bucket, so the location names the one the local rustfs
+	// creates rather than a GCS bucket from the developer's environment.
+	if !namedExplicitly(r, "storage.snapshotLocation") {
+		r.set("storage.snapshotLocation", "gs://"+r.String("storage.bucketName")+"/", OriginKindProfile)
 	}
 }
 
@@ -405,16 +408,19 @@ func validateResolved(cfg *Config, r *Resolved) error {
 		return &InvalidError{Value: size, Want: ClusterSizeSize0 + " or " + ClusterSizeSize10}
 	}
 
-	authMode, _ := r.Value("ingressAuthMode")
-	switch cfg.IngressAuthMode {
-	case IngressAuthDeprecatedInsecure:
-	case IngressAuthStaticMTLS:
-		if cfg.Router != RouterEnvoy {
-			return &ConflictError{A: authMode, B: dataplane,
-				Why: IngressAuthStaticMTLS + " requires dataplane " + RouterEnvoy}
+	// The router and ate-api-server reject a malformed ID at startup; catch it
+	// before the rollout does.
+	for _, id := range cfg.IngressAllowedSPIFFEIDs {
+		if _, err := spiffeid.FromString(id); err != nil {
+			ids, _ := r.Value("ingressAllowedSPIFFEIDs")
+			return &InvalidError{Value: ids, Want: fmt.Sprintf("a comma-separated list of SPIFFE IDs (%q: %v)", id, err)}
 		}
-	default:
-		return &InvalidError{Value: authMode, Want: IngressAuthDeprecatedInsecure + " or " + IngressAuthStaticMTLS}
+	}
+	for _, id := range cfg.EgressGatewayExtraSPIFFEIDs {
+		if _, err := spiffeid.FromString(id); err != nil {
+			ids, _ := r.Value("ateapi.authz.egressGatewayExtraSPIFFEIDs")
+			return &InvalidError{Value: ids, Want: fmt.Sprintf("a comma-separated list of SPIFFE IDs (%q: %v)", id, err)}
+		}
 	}
 
 	switch cfg.APILogLevel {
@@ -430,7 +436,7 @@ func validateResolved(cfg *Config, r *Resolved) error {
 		alg, _ := r.Value("actorJWT.algorithm")
 		return &InvalidError{Value: alg, Want: "ES256 or RS256"}
 	}
-	if err := oidcdiscovery.ValidateIssuer(cfg.ActorJWTIssuer); err != nil {
+	if err := actoridjwt.ValidateIssuer(cfg.ActorJWTIssuer); err != nil {
 		issuer, _ := r.Value("actorJWT.issuer")
 		return fmt.Errorf("%s: %w (from %s)", issuer.Setting.Key, err, issuer.From.Describe(issuer.Setting))
 	}
@@ -462,7 +468,7 @@ func validateResolved(cfg *Config, r *Resolved) error {
 	// configuration rather than part-way through a deploy. Whether one is
 	// required at all is the deploy's question, not this one's.
 	if cfg.CredentialProviderJSON != "" {
-		if _, err := cfg.CredentialProvider(); err != nil {
+		if _, err := cfg.CredentialProviders(); err != nil {
 			// The parser's own message says which part is wrong and what to
 			// write instead; only the channel is added. Replacing it with the
 			// generic "must be <usage>" would drop the reason.
@@ -470,12 +476,11 @@ func validateResolved(cfg *Config, r *Resolved) error {
 			return fmt.Errorf("%w (from %s)", err, provider.From.Describe(provider.Setting))
 		}
 	}
-	// ate-api-server exits on this combination, so catch it before deploying.
-	if cfg.APIExperimentalEnableAuthz && strings.Trim(cfg.APIAuthzBootstrapOwners, " ,") == "" {
-		enabled, _ := r.Value("ateapi.authz.enabled")
+	// ate-api-server exits without a bootstrap owner, so catch it before
+	// deploying.
+	if strings.Trim(cfg.APIAuthzBootstrapOwners, " ,") == "" {
 		owners, _ := r.Value("ateapi.authz.bootstrapOwners")
-		return &ConflictError{A: enabled, B: owners,
-			Why: "enforced authorization needs at least one bootstrap owner"}
+		return &InvalidError{Value: owners, Want: "a list of at least one bootstrap owner"}
 	}
 	return nil
 }

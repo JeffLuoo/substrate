@@ -23,6 +23,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/opencontainers/runtime-spec/specs-go"
@@ -39,8 +40,8 @@ var testActorDirs = &ateworkerpb.ActorDirs{
 	OciBundleDir: "/node/actors/test-actor-123/bundle",
 }
 
-// writeSpec builds a workload container's spec from the request and the pause
-// container's from ateworker's own description.
+// writeSpec builds a workload container's spec from the request, and a
+// sandbox spec with no process and no rootfs. It makes the sandbox bundle.
 func TestWriteSpec(t *testing.T) {
 	root := t.TempDir()
 	actorDirs := &ateworkerpb.ActorDirs{RootDir: root, OciBundleDir: filepath.Join(root, "bundles")}
@@ -49,18 +50,18 @@ func TestWriteSpec(t *testing.T) {
 		actorDirs:  actorDirs,
 		containers: []*ateworkerpb.Container{{Name: "app", ContainerSpec: &ateworkerpb.ContainerSpec{Args: []string{"/app", "serve"}}}},
 	}
-	for name, wantArgs := range map[string][]string{
-		"app":                  {"/app", "serve"},
-		ocispec.PauseContainer: {"/pause"},
-	} {
-		bundle := ociBundlePath(actorDirs, name)
-		if err := os.MkdirAll(bundle, 0o700); err != nil {
-			t.Fatal(err)
-		}
+	// atelet makes the application bundle; writeSpec does not make it.
+	if err := r.writeSpec("app"); err == nil {
+		t.Error("writeSpec(app) = nil without the bundle atelet makes")
+	}
+	if err := os.MkdirAll(ociBundlePath(actorDirs, "app"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"app", ocispec.SandboxID} {
 		if err := r.writeSpec(name); err != nil {
 			t.Fatalf("writeSpec(%q) = %v", name, err)
 		}
-		b, err := os.ReadFile(filepath.Join(bundle, "config.json"))
+		b, err := os.ReadFile(filepath.Join(ociBundlePath(actorDirs, name), "config.json"))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -68,14 +69,17 @@ func TestWriteSpec(t *testing.T) {
 		if err := json.Unmarshal(b, &spec); err != nil {
 			t.Fatal(err)
 		}
-		if !slices.Equal(spec.Process.Args, wantArgs) {
-			t.Errorf("%s args = %v, want %v", name, spec.Process.Args, wantArgs)
-		}
 		if got := spec.Annotations["io.kubernetes.cri.container-name"]; got != name {
 			t.Errorf("%s container-name annotation = %q, want the spec shaped for gVisor", name, got)
 		}
-		if name == ocispec.PauseContainer && len(spec.Process.Capabilities.Bounding) != 0 {
-			t.Errorf("pause capabilities = %v, want none", spec.Process.Capabilities.Bounding)
+		if name == ocispec.SandboxID {
+			if spec.Process != nil || spec.Root != nil || spec.Mounts != nil {
+				t.Errorf("sandbox spec has process %v, root %v, mounts %v; want none", spec.Process, spec.Root, spec.Mounts)
+			}
+			continue
+		}
+		if want := []string{"/app", "serve"}; spec.Process == nil || !slices.Equal(spec.Process.Args, want) {
+			t.Errorf("%s process = %+v, want args %v", name, spec.Process, want)
 		}
 	}
 	if err := r.writeSpec("missing"); err == nil {
@@ -205,6 +209,29 @@ func TestBuildArgs(t *testing.T) {
 	}
 }
 
+func TestBuildArgsEnableCoreTags(t *testing.T) {
+	r := &runsc{
+		path:           "/usr/bin/runsc",
+		actorUID:       "test-actor-123",
+		actorDirs:      testActorDirs,
+		flags:          mustFlagStore(t),
+		enableCoreTags: true,
+	}
+
+	got := r.buildArgs("wait", "my-container")
+	want := []string{
+		"-global1",
+		"-global2",
+		"--enable-core-tags",
+		"-root", "/node/actors/test-actor-123/runsc-state",
+		"wait",
+		"my-container",
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("buildArgs(\"wait\", \"my-container\") = %v, want %v", got, want)
+	}
+}
+
 func TestCheckpointArgs(t *testing.T) {
 	r := &runsc{
 		path:      "/usr/bin/runsc",
@@ -214,15 +241,16 @@ func TestCheckpointArgs(t *testing.T) {
 	}
 	checkpointDir := "/node/actors/test-actor-123/checkpoints/snap-1"
 
-	got := r.checkpointArgs(ocispec.PauseContainer, checkpointDir, []string{"app:/var/data", "app:/var/cache"})
+	got := r.checkpointArgs(ocispec.SandboxID, checkpointDir, []string{"rootfs/=app:/", "fs/=app:/var/data"})
 	want := []string{
 		"-global1",
 		"-global2",
 		"-root", "/node/actors/test-actor-123/runsc-state",
 		"checkpoint",
 		"-image-path", checkpointDir,
-		"-fs-checkpoint-paths", "app:/var/data,app:/var/cache",
-		ocispec.PauseContainer,
+		"-fs-checkpoint-paths", "rootfs/=app:/",
+		"-fs-checkpoint-paths", "fs/=app:/var/data",
+		ocispec.SandboxID,
 	}
 
 	if !reflect.DeepEqual(got, want) {
@@ -239,20 +267,65 @@ func TestFsCheckpointArgs(t *testing.T) {
 	}
 	checkpointDir := "/node/actors/test-actor-123/checkpoints/snap-1"
 
-	got := r.fsCheckpointArgs(ocispec.PauseContainer, checkpointDir, []string{"app:/var/data", "app:/var/cache"})
+	got := r.fsCheckpointArgs(ocispec.SandboxID, checkpointDir, []string{"rootfs/=app:/", "fs/=app:/var/data"})
 	want := []string{
 		"-global1",
 		"-global2",
 		"-root", "/node/actors/test-actor-123/runsc-state",
 		"fscheckpoint",
-		"-image-path", filepath.Join(checkpointDir, "fs"),
-		"-path", "app:/var/data",
-		"-path", "app:/var/cache",
-		ocispec.PauseContainer,
+		"-image-path", checkpointDir,
+		"-path", "rootfs/=app:/",
+		"-path", "fs/=app:/var/data",
+		ocispec.SandboxID,
 	}
 
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("fsCheckpointArgs() = %v, want %v", got, want)
+	}
+}
+
+// Only the sandbox gets -no-root-container: runsc refuses it for any other
+// container.
+func TestCreateArgs(t *testing.T) {
+	r := &runsc{
+		path:      "/usr/bin/runsc",
+		actorUID:  "test-actor-123",
+		actorDirs: testActorDirs,
+		flags:     mustFlagStore(t),
+	}
+	for _, tc := range []struct {
+		container string
+		extra     []string
+		want      []string
+	}{{
+		container: ocispec.SandboxID,
+		extra:     []string{"-fs-restore-image-path", "/snap/fs"},
+		want: []string{
+			"-global1",
+			"-global2",
+			"-root", "/node/actors/test-actor-123/runsc-state",
+			"create",
+			"-no-root-container",
+			"-bundle", "/node/actors/test-actor-123/bundle/" + ocispec.SandboxID,
+			"-pid-file", "/node/actors/test-actor-123/pidfiles/" + ocispec.SandboxID + ".pid",
+			"-fs-restore-image-path", "/snap/fs",
+			ocispec.SandboxID,
+		},
+	}, {
+		container: "app",
+		want: []string{
+			"-global1",
+			"-global2",
+			"-root", "/node/actors/test-actor-123/runsc-state",
+			"create",
+			"-bundle", "/node/actors/test-actor-123/bundle/app",
+			"-pid-file", "/node/actors/test-actor-123/pidfiles/app.pid",
+			"app",
+		},
+	}} {
+		if got := r.createArgs(tc.container, tc.extra); !reflect.DeepEqual(got, tc.want) {
+			t.Errorf("createArgs(%q) = %v, want %v", tc.container, got, tc.want)
+		}
 	}
 }
 
@@ -265,23 +338,44 @@ func TestRestoreArgs(t *testing.T) {
 	}
 	checkpointDir := "/node/actors/test-actor-123/checkpoints/snap-1"
 
-	got := r.restoreArgs(ocispec.PauseContainer, checkpointDir)
-	want := []string{
-		"-global1",
-		"-global2",
-		"-restore-global",
-		"-root", "/node/actors/test-actor-123/runsc-state",
-		"restore",
-		"-restore-sub1",
-		"-restore-sub2",
-		"-bundle", "/node/actors/test-actor-123/bundle/" + ocispec.PauseContainer,
-		"-image-path", checkpointDir,
-		"-pid-file", "/node/actors/test-actor-123/pidfiles/" + ocispec.PauseContainer + ".pid",
-		ocispec.PauseContainer,
-	}
-
-	if !reflect.DeepEqual(got, want) {
-		t.Errorf("restoreArgs() = %v, want %v", got, want)
+	for _, tc := range []struct {
+		container string
+		want      []string
+	}{{
+		container: ocispec.SandboxID,
+		want: []string{
+			"-global1",
+			"-global2",
+			"-restore-global",
+			"-root", "/node/actors/test-actor-123/runsc-state",
+			"restore",
+			"-restore-sub1",
+			"-restore-sub2",
+			"-no-root-container",
+			"-bundle", "/node/actors/test-actor-123/bundle/" + ocispec.SandboxID,
+			"-image-path", checkpointDir,
+			"-pid-file", "/node/actors/test-actor-123/pidfiles/" + ocispec.SandboxID + ".pid",
+			ocispec.SandboxID,
+		},
+	}, {
+		container: "app",
+		want: []string{
+			"-global1",
+			"-global2",
+			"-restore-global",
+			"-root", "/node/actors/test-actor-123/runsc-state",
+			"restore",
+			"-restore-sub1",
+			"-restore-sub2",
+			"-bundle", "/node/actors/test-actor-123/bundle/app",
+			"-image-path", checkpointDir,
+			"-pid-file", "/node/actors/test-actor-123/pidfiles/app.pid",
+			"app",
+		},
+	}} {
+		if got := r.restoreArgs(tc.container, checkpointDir); !reflect.DeepEqual(got, tc.want) {
+			t.Errorf("restoreArgs(%q) = %v, want %v", tc.container, got, tc.want)
+		}
 	}
 }
 
@@ -291,34 +385,22 @@ func TestRestoreWorkloadRejectsEmptyRestoreDir(t *testing.T) {
 		inFlight: actorlock.NewInFlight(),
 	}
 
+	noDirs := validRestoreRequest()
+	noDirs.ActorDirs = nil
+	noRestoreDir := validRestoreRequest()
+	noRestoreDir.ActorDirs.RestoreDir = ""
 	for _, tc := range []struct {
 		name string
 		req  *ateworkerpb.RestoreWorkloadRequest
+		want string
 	}{
-		{
-			name: "nil actor_dirs",
-			req:  &ateworkerpb.RestoreWorkloadRequest{ActorUid: "actor-a"},
-		},
-		{
-			name: "empty restore_dir",
-			req: &ateworkerpb.RestoreWorkloadRequest{
-				ActorUid: "actor-a",
-				ActorDirs: &ateworkerpb.ActorDirs{
-					RootDir:                   "/node/actors/actor-a",
-					OciBundleDir:              "/node/actors/actor-a/bundle",
-					CheckpointDir:             "/node/actors/actor-a/checkpoint-state",
-					DurableDirVolumeMountsDir: "/node/actors/actor-a/durable-dirs",
-					SystemInfoVolumeRootsDir:  "/node/actors/actor-a/system-info",
-					ExternalVolumeMountsDir:   "/node/actors/actor-a/volumes",
-					SandboxAssetsDir:          "/node/actors/actor-a/sandbox-assets",
-				},
-			},
-		},
+		{name: "nil actor_dirs", req: noDirs, want: "actor_dirs"},
+		{name: "empty restore_dir", req: noRestoreDir, want: "restore_dir"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			_, err := s.RestoreWorkload(context.Background(), tc.req)
-			if apierror.Code(err) != codes.InvalidArgument {
-				t.Fatalf("RestoreWorkload() code = %v, want %v (err: %v)", apierror.Code(err), codes.InvalidArgument, err)
+			if apierror.Code(err) != codes.InvalidArgument || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("RestoreWorkload() = %v, want InvalidArgument naming %s", err, tc.want)
 			}
 		})
 	}

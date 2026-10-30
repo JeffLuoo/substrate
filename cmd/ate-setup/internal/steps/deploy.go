@@ -27,6 +27,7 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 
+	"go.ate.dev/substrate/cmd/ate-setup/internal/config"
 	"go.ate.dev/substrate/cmd/ate-setup/internal/kube"
 	"go.ate.dev/substrate/cmd/ate-setup/internal/log"
 )
@@ -64,14 +65,23 @@ func (e *Env) DeployAteSystem(ctx context.Context, opts DeployOptions) error {
 	}
 	// Fail fast on an unusable credential provider selection before touching
 	// the cluster.
-	provider, err := e.Cfg.CredentialProvider()
+	providers, err := e.Cfg.CredentialProviders()
 	if err != nil {
+		return err
+	}
+	// Likewise a credential exchange without a transfer service account.
+	if err := e.Cfg.RequireTransferServiceAccount(); err != nil {
 		return err
 	}
 	// Likewise the CSI request, even though it is only acted on partway
 	// through: a driver this cluster cannot run is worth knowing before the
 	// control plane goes up, not after.
 	if err := e.CheckCSIDriver(opts.SetupCSI); err != nil {
+		return err
+	}
+	// The snapshot location is only written into ate-api-server's ConfigMap
+	// partway through, so check it before the cluster is touched.
+	if _, err := clusterSnapshotLocation(e.Cfg.SnapshotLocation, e.Cfg.PreviewGates); err != nil {
 		return err
 	}
 	if err := e.requireNoWorkerPods(ctx); err != nil {
@@ -150,7 +160,7 @@ func (e *Env) DeployAteSystem(ctx context.Context, opts DeployOptions) error {
 	}
 	// After the podcertificate controller: the provider serves with a
 	// projected pod certificate.
-	if provider.Kubernetes() {
+	if config.HasKubernetesProvider(providers) {
 		err = e.deployK8sCredentialProvider(ctx)
 	} else {
 		err = e.removeK8sCredentialProvider(ctx)
@@ -158,7 +168,7 @@ func (e *Env) DeployAteSystem(ctx context.Context, opts DeployOptions) error {
 	if err != nil {
 		return err
 	}
-	if err := e.applyAtenetEgress(ctx, provider); err != nil {
+	if err := e.applyAtenetEgress(ctx, providers); err != nil {
 		return err
 	}
 
@@ -167,12 +177,13 @@ func (e *Env) DeployAteSystem(ctx context.Context, opts DeployOptions) error {
 	var waits []rollout
 	waits = append(waits,
 		rollout{kube.KindDeployment, "ate-api-server"},
+		rollout{kube.KindDeployment, "ate-idp-server"},
 		rollout{kube.KindDeployment, "ate-controller"},
 		rollout{kube.KindDeployment, "atenet-router"},
 		rollout{kube.KindDeployment, "atenet-egress"},
 		rollout{kube.KindDaemonSet, "atelet"},
 	)
-	if provider.Kubernetes() {
+	if config.HasKubernetesProvider(providers) {
 		waits = append(waits, rollout{kube.KindDeployment, k8sCredentialProviderDeployment})
 	}
 	for _, w := range waits {
@@ -278,10 +289,18 @@ func setPodcertWorkersPerSigner(objs []*unstructured.Unstructured, workers int) 
 	return unstructured.SetNestedSlice(dep.Object, containers, "spec", "template", "spec", "containers")
 }
 
-// DeployAteAPIServer redeploys only ate-api-server.
+// DeployAteAPIServer redeploys ate-api-server and ate-idp-server.
 func (e *Env) DeployAteAPIServer(ctx context.Context) error {
 	log.Step("deploy_ate_apiserver")
 
+	// Checked before the CRDs, namespace and Secrets go in, rather than when
+	// the ConfigMap is written.
+	if _, err := clusterSnapshotLocation(e.Cfg.SnapshotLocation, e.Cfg.PreviewGates); err != nil {
+		return err
+	}
+	if err := e.Cfg.RequireTransferServiceAccount(); err != nil {
+		return err
+	}
 	if err := e.EnsureCRDs(ctx); err != nil {
 		return err
 	}
@@ -317,7 +336,17 @@ func (e *Env) DeployAteAPIServer(ctx context.Context) error {
 	if err := e.reconcileCloudSQLProxySidecar(ctx); err != nil {
 		return err
 	}
-	return e.Kube.RolloutStatus(ctx, kube.KindDeployment, e.Namespace(), "ate-api-server", e.Cfg.RolloutTimeout)
+	// ate-idp-server shares only the actor JWT pool with ate-api-server. It
+	// comes along so that redeploying an older release rolls it back too.
+	if err := e.deployIDPServer(ctx); err != nil {
+		return err
+	}
+	for _, name := range []string{"ate-api-server", "ate-idp-server"} {
+		if err := e.Kube.RolloutStatus(ctx, kube.KindDeployment, e.Namespace(), name, e.Cfg.RolloutTimeout); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // apiServerManifestPath is the ate-api-server manifest for the environment.
@@ -502,7 +531,7 @@ func (e *Env) ateletManifestPath() string {
 func (e *Env) DeployAtenet(ctx context.Context) error {
 	log.Step("deploy_atenet")
 
-	provider, err := e.Cfg.CredentialProvider()
+	providers, err := e.Cfg.CredentialProviders()
 	if err != nil {
 		return err
 	}
@@ -529,7 +558,7 @@ func (e *Env) DeployAtenet(ctx context.Context) error {
 	if err := e.EnsureEgressMITMCAPoolSecret(ctx); err != nil {
 		return err
 	}
-	if provider.Kubernetes() {
+	if config.HasKubernetesProvider(providers) {
 		err = e.deployK8sCredentialProvider(ctx)
 	} else {
 		err = e.removeK8sCredentialProvider(ctx)
@@ -537,12 +566,12 @@ func (e *Env) DeployAtenet(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	if err := e.applyAtenetEgress(ctx, provider); err != nil {
+	if err := e.applyAtenetEgress(ctx, providers); err != nil {
 		return err
 	}
 
 	deployments := []string{"atenet-router", "atenet-egress"}
-	if provider.Kubernetes() {
+	if config.HasKubernetesProvider(providers) {
 		deployments = append(deployments, k8sCredentialProviderDeployment)
 	}
 	for _, name := range deployments {
@@ -568,10 +597,8 @@ func (e *Env) DeploySandboxConfig(ctx context.Context) error {
 		return err
 	}
 
-	// Install the cluster-wide sandbox config. Sandbox binaries live on
-	// cluster-scoped SandboxConfigs each ActorTemplate names via
-	// sandboxConfig.configName; gVisor templates name this one unless they
-	// create their own SandboxConfig.
+	// Install the cluster-wide default gVisor SandboxConfig that gVisor
+	// WorkerPools resolve by default unless they pin their own configRef.
 	return e.Kube.ApplyPath(ctx, e.Cfg.Manifest("sandboxconfig-gvisor.yaml"))
 }
 

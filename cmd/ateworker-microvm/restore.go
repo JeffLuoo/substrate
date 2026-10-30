@@ -20,6 +20,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -32,9 +33,11 @@ import (
 	"go.ate.dev/substrate/internal/workerstats"
 
 	"go.ate.dev/substrate/internal/ateworker/actornet"
+	"go.ate.dev/substrate/internal/ateworker/cgroup"
 
 	"go.ate.dev/substrate/cmd/ateworker-microvm/internal/ch"
 	"go.ate.dev/substrate/cmd/ateworker-microvm/internal/kata"
+	"go.ate.dev/substrate/internal/ateworkervalidation"
 	"go.ate.dev/substrate/internal/imagecache"
 	"go.ate.dev/substrate/internal/proto/ateworkerpb"
 	"go.ate.dev/substrate/internal/resources"
@@ -66,17 +69,27 @@ func restoreMemMode(ctx context.Context, info ch.VMMInfo) string {
 	return ch.MemRestoreEager
 }
 
+// reseedTimeout bounds ReseedRandomDev. It needs to cover a whole resume wave, not a
+// single quiet guest.
+const reseedTimeout = 60 * time.Second
+
+// randomDevReseeder is the part of *kata.AgentClient that reseedGuestCRNG
+// uses, so tests can fake it.
+type randomDevReseeder interface {
+	ReseedRandomDev(ctx context.Context, data []byte) error
+}
+
 // reseedGuestCRNG mixes fresh, per-restore entropy into the restored guest's kernel
 // CRNG through the kata-agent (see the call site in restoreMemoryFidelity for why a restore
 // needs this). The nonce is a throwaway; its only job is to differ between restores so
 // that clones of one snapshot diverge instead of producing identical randomness. The
 // caller owns ac: it stays open for log forwarding and guest stats.
-func reseedGuestCRNG(ctx context.Context, ac *kata.AgentClient) error {
+func reseedGuestCRNG(ctx context.Context, ac randomDevReseeder) error {
 	nonce, err := newReseedNonce()
 	if err != nil {
 		return err
 	}
-	rctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	rctx, cancel := context.WithTimeout(ctx, reseedTimeout)
 	defer cancel()
 	return ac.ReseedRandomDev(rctx, nonce)
 }
@@ -105,7 +118,11 @@ func newReseedNonce() ([]byte, error) {
 // Contract with atelet: the snapshot's files are in ActorDirs.restore_dir,
 // and the durable-dir volume directories re-created (empty).
 func (s *AteWorkerService) RestoreWorkload(ctx context.Context, req *ateworkerpb.RestoreWorkloadRequest) (resp *ateworkerpb.RestoreWorkloadResponse, retErr error) {
-	if err := validateActorDirs(req.GetActorDirs()); err != nil {
+	if err := ateworkervalidation.ValidateRestoreWorkloadRequest(ctx, req); err != nil {
+		return nil, err
+	}
+	epoch, err := s.epoch.Require()
+	if err != nil {
 		return nil, err
 	}
 	if err := validateFidelity(req.GetFidelity()); err != nil {
@@ -141,7 +158,7 @@ func (s *AteWorkerService) RestoreWorkload(ctx context.Context, req *ateworkerpb
 		containers:       req.GetSpec().GetContainers(),
 		assetPaths:       req.GetRuntimeAssetPaths(),
 		egressGateway:    req.GetEgressGateway(),
-		size:             sizing.FromLimits(req.GetCpuMilli(), req.GetMemoryBytes()),
+		size:             sizing.FromLimits(req.GetResources().GetLimits()),
 	}
 	restoreDir := p.actorDirs.GetRestoreDir()
 	durableDir := p.actorDirs.GetDurableDirVolumeMountsDir()
@@ -158,7 +175,7 @@ func (s *AteWorkerService) RestoreWorkload(ctx context.Context, req *ateworkerpb
 	// so only it counts from the first reading; the lower fidelities cold-boot
 	// a fresh guest whose CPU counts from zero.
 	resumesGuest := includesMemory(req.GetFidelity())
-	if _, err := s.hostActor(ctx, attribution, resumesGuest); err != nil {
+	if _, err := s.hostActor(ctx, attribution, resumesGuest, p.size.MemoryBytes); err != nil {
 		return nil, err
 	}
 	defer func() {
@@ -169,6 +186,9 @@ func (s *AteWorkerService) RestoreWorkload(ctx context.Context, req *ateworkerpb
 			_ = s.unhostActor(cleanupCtx, attribution.UID)
 		}
 	}()
+	if err := s.borrow.Wait(ctx); err != nil {
+		return nil, err
+	}
 
 	// Restore the durable-dir volumes before anything can observe them: for MEMORY
 	// that means before the share's virtiofsd starts, for the lower fidelities
@@ -217,7 +237,7 @@ func (s *AteWorkerService) RestoreWorkload(ctx context.Context, req *ateworkerpb
 	}
 
 	s.actorLogger.EmitLifecycleLog(ctx, "Actor restored", attribution)
-	return &ateworkerpb.RestoreWorkloadResponse{}, nil
+	return &ateworkerpb.RestoreWorkloadResponse{WorkerEpoch: epoch}, nil
 }
 
 // restoreMemoryFidelity restores a whole-guest snapshot: relaunch cloud-hypervisor
@@ -246,6 +266,23 @@ func (s *AteWorkerService) restoreMemoryFidelity(ctx context.Context, p actorBoo
 	if err != nil {
 		return err
 	}
+	// On failure, undo everything below that outlives the processes. This defer
+	// MUST stay registered first (right after PrepareEgress): defers run last
+	// in, first out, so it runs after the defers below have drained the
+	// background untar and stopped cloud-hypervisor and virtiofsd. Only then is
+	// it safe to sweep the sandbox state (which detaches the merged rootfs
+	// overlays over the upper dir) and remove the upper dir; moving a defer
+	// above this one would remove the upper under a live untar or overlay.
+	defer func() {
+		if retErr != nil {
+			cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+			defer cancel()
+			if cleanupErr := s.tunnel.Deactivate(cleanupCtx, p.attribution()); cleanupErr != nil {
+				slog.WarnContext(cleanupCtx, "Failed to deactivate actor networking after Restore failure", slog.Any("err", cleanupErr))
+			}
+			s.cleanupFailedRestoreRootfs(cleanupCtx, actorUID, p.actorDirs)
+		}
+	}()
 	s.cleanupSandboxState(ctx, actorUID)
 
 	// Repoint the snapshot's per-actor paths to this actor's: its VMDir
@@ -292,12 +329,6 @@ func (s *AteWorkerService) restoreMemoryFidelity(ctx context.Context, p actorBoo
 	// deterministic unpack of the same image at the same <cid>/rootfs path
 	// (plus, for merged rootfs, the upper re-materialized from the tar).
 	containers := p.containers
-	if len(containers) == 0 {
-		return apierror.InvalidArgument("actor spec has no containers")
-	}
-	if len(containers) > maxActorContainers {
-		return apierror.Unimplemented("ateworker-microvm supports at most %d containers, got %d", maxActorContainers, len(containers))
-	}
 	ctrs, err := s.buildActorContainers(p.actorUID, p.actorDirs, containers)
 	if err != nil {
 		return err
@@ -312,19 +343,18 @@ func (s *AteWorkerService) restoreMemoryFidelity(ctx context.Context, p actorBoo
 		return untarErr
 	}
 	tUpper := time.Now()
-	leaf, err := s.actorLeaf(actorUID, p.size)
+	leaf, err := cgroup.OpenActorLeaf(actorUID, p.size.MilliCPU, s.leafMemoryHigh(p.size.MemoryBytes))
 	if err != nil {
 		return err
 	}
 	defer leaf.Close()
-	vfsdCmd, err := s.stageMergedRootfs(ctx, rr, actorUID, p.actorDirs, ctrs, containers, leaf.SysProcAttr())
+	vfsdProc, err := s.stageMergedRootfs(ctx, rr, actorUID, p.actorDirs, ctrs, containers, leaf.SysProcAttr())
 	if err != nil {
 		return err
 	}
 	defer func() {
-		if retErr != nil && vfsdCmd.Process != nil {
-			_ = vfsdCmd.Process.Kill()
-			_, _ = vfsdCmd.Process.Wait()
+		if retErr != nil {
+			vfsdProc.Stop()
 		}
 	}()
 
@@ -335,20 +365,6 @@ func (s *AteWorkerService) restoreMemoryFidelity(ctx context.Context, p actorBoo
 	// fd-backed, so CH needs fresh tap FDs (net_fds) on restore. The caller
 	// unhosts on failure, once the defers here have stopped the actor's
 	// processes.
-	defer func() {
-		if retErr != nil {
-			cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
-			defer cancel()
-			if cleanupErr := s.tunnel.Deactivate(cleanupCtx, p.attribution()); cleanupErr != nil {
-				slog.WarnContext(cleanupCtx, "Failed to deactivate actor networking after Restore failure", slog.Any("err", cleanupErr))
-			}
-			// Detach any bundle rootfs overlays mounted by buildActorContainers
-			// before the failure, mirroring teardownActor's cleanup.
-			if err := imagecache.UnmountAllUnder(p.actorDirs.GetOciBundleDir()); err != nil {
-				slog.WarnContext(ctx, "Failed to unmount bundle rootfs overlays after Restore failure", slog.Any("err", err))
-			}
-		}
-	}()
 	netDevs, err := ch.SnapshotNetDevices(restoreDir)
 	if err != nil {
 		return fmt.Errorf("while reading snapshot net devices: %w", err)
@@ -376,7 +392,7 @@ func (s *AteWorkerService) restoreMemoryFidelity(ctx context.Context, p actorBoo
 	// Relaunch CH and restore with the tap FDs attached (SCM_RIGHTS).
 	apiSocket := filepath.Join(kata.VMDir(actorUID), "clh-api-restore.sock")
 	tTap := time.Now()
-	chCmd, client, err := ch.LaunchVMM(ctx, ch.LaunchVMMOptions{
+	chProc, client, err := ch.LaunchVMM(ctx, ch.LaunchVMMOptions{
 		Binary: rr.chBinary, APISocket: apiSocket, Stdout: slogWriter{ctx}, Stderr: slogWriter{ctx},
 		SysProcAttr: leaf.SysProcAttr(),
 	})
@@ -384,9 +400,8 @@ func (s *AteWorkerService) restoreMemoryFidelity(ctx context.Context, p actorBoo
 		return fmt.Errorf("while launching VMM for restore: %w", err)
 	}
 	defer func() {
-		if retErr != nil && chCmd.Process != nil {
-			_ = chCmd.Process.Kill()
-			_, _ = chCmd.Process.Wait()
+		if retErr != nil {
+			chProc.Stop()
 		}
 	}()
 	// How guest RAM comes back depends on the VMM (see restoreMemMode), and the rest
@@ -417,7 +432,7 @@ func (s *AteWorkerService) restoreMemoryFidelity(ctx context.Context, p actorBoo
 	maybeDropStagedMemoryImage(ctx, restoreDir, memMode, preserveRestoreDir)
 	dropActorSnapshotCacheAsync(restoreDir, memMode == ch.MemRestoreEager)
 	if err := client.Resume(ctx); err != nil {
-		return fmt.Errorf("while resuming restored guest: %w", err)
+		return restoreGuestReadyError(ctx, "resuming restored guest", err)
 	}
 	tResume := time.Now()
 
@@ -426,7 +441,7 @@ func (s *AteWorkerService) restoreMemoryFidelity(ctx context.Context, p actorBoo
 	// fails the restore. A failing restore closes the connection on its way out.
 	guestAC, err := dialAgentRetry(ctx, kata.VsockSocketPath(actorUID), 15*time.Second)
 	if err != nil {
-		return fmt.Errorf("while dialing kata-agent after resume: %w", err)
+		return restoreGuestReadyError(ctx, "dialing kata-agent after resume", err)
 	}
 	defer func() {
 		if retErr != nil {
@@ -451,9 +466,19 @@ func (s *AteWorkerService) restoreMemoryFidelity(ctx context.Context, p actorBoo
 	// and notifies the guest before unpausing the vCPUs, so a >=5.18 kernel reseeds its
 	// CRNG on its own with no host round-trip, no per-restore RPC, and no post-Resume
 	// race. At that point this agent-driven reseed can be dropped.
+	//
+	// Egress opens only once the reseed succeeds, so nothing leaves the host drawn
+	// from CRNG state the actor shares with the snapshot's other clones, and a
+	// failed reseed is still safe to retry (see restoreGuestReadyError). The
+	// restored workload is past its boot, so it needs egress only from the wakeup
+	// probe on. Ingress follows the wakeup probe, as in coldBootActor.
 	if err := reseedGuestCRNG(ctx, guestAC); err != nil {
-		return fmt.Errorf("while reseeding guest CRNG: %w", err)
+		return restoreGuestReadyError(ctx, "reseeding guest CRNG", err)
 	}
+	if err := s.tunnel.ActivateEgress(p.attribution(), egress); err != nil {
+		return err
+	}
+	tReseeded := time.Now()
 
 	// Block until every wakeup-probe-enabled container reports 200.
 	if err := wakeupprobe.WaitAll(ctx, containers, actornet.ActorVethIP, wakeupprobe.DialFunc(s.sandboxDialer(actorUID))); err != nil {
@@ -463,7 +488,8 @@ func (s *AteWorkerService) restoreMemoryFidelity(ctx context.Context, p actorBoo
 	// Where a resume goes. Like the boot phases, this used to be a single total,
 	// which hid that a first (cold) restore and a later (warm) one differ by more
 	// than 5x on the same actor. upper/lowers is the host reassembling the rootfs;
-	// vm_restore is cloud-hypervisor reading guest RAM back.
+	// vm_restore is cloud-hypervisor reading guest RAM back; reseed is the kata-agent dial
+	// and the CRNG reseed, the head of wakeup_probe.
 	dWakeupProbe := time.Since(tResume)
 	dTotal := time.Since(tStart)
 	slog.InfoContext(ctx, "Actor restore phases", slog.String("id", actorUID),
@@ -476,6 +502,7 @@ func (s *AteWorkerService) restoreMemoryFidelity(ctx context.Context, p actorBoo
 		slog.Duration("vmm_launch", tLaunch.Sub(tTap)),
 		slog.Duration("vm_restore", tVMRestore.Sub(tLaunch)),
 		slog.Duration("resume", tResume.Sub(tVMRestore)),
+		slog.Duration("reseed", tReseeded.Sub(tResume)),
 		slog.Duration("wakeup_probe", dWakeupProbe),
 		slog.Duration("total", dTotal))
 	// The joinable per-actor record the benchmarking tooling aggregates. The
@@ -496,8 +523,8 @@ func (s *AteWorkerService) restoreMemoryFidelity(ctx context.Context, p actorBoo
 		})
 
 	ra := &runningActor{
-		chCmd: chCmd, vfsdCmd: vfsdCmd,
-		apiSocket: apiSocket, baseID: srcID, restoreSourceDir: restoreDir,
+		chProc: chProc, vfsdProc: vfsdProc,
+		apiSocket: apiSocket, memoryBytes: p.size.MemoryBytes, baseID: srcID, restoreSourceDir: restoreDir,
 		preserveRestoreSource:   preserveRestoreDir,
 		snapshotIsSelfContained: memMode == ch.MemRestoreEager,
 		// Signaling an id the agent does not know fails the whole graceful
@@ -510,14 +537,16 @@ func (s *AteWorkerService) restoreMemoryFidelity(ctx context.Context, p actorBoo
 	// connection dialed after resume: the restored guest's containers are alive, so
 	// ReadStdout/ReadStderr pick up where they left off.
 	attribution := p.actorAttribution()
-	for _, c := range containers {
-		s.startActorLogForwarding(guestAC, attribution, c.GetName(), c.GetName())
+	for _, c := range ctrs {
+		s.startActorLogForwarding(guestAC, attribution, c.id, c.name)
 	}
 
-	if err := s.tunnel.Activate(p.attribution(), s.sandboxDialer(p.actorUID), egress); err != nil {
+	if err := s.tunnel.ActivateIngress(p.attribution(), s.sandboxDialer(p.actorUID)); err != nil {
 		return err
 	}
+	ra.memory.Resume(uint64(s.leafMemoryHigh(p.size.MemoryBytes)))
 	s.setRunningVM(actorUID, ra)
+	go s.watchVM(p.attribution(), p.actorDirs, ra)
 
 	// Publish the guest to GetWorkloadStats, past the last error return above
 	// for the same reason as in coldBootActor. Same client the forwarding above
@@ -543,6 +572,61 @@ func maybeDropStagedMemoryImage(ctx context.Context, restoreDir, memMode string,
 		return
 	}
 	dropStagedMemoryImage(ctx, restoreDir)
+}
+
+// cleanupFailedRestoreRootfs removes what a failed memory restore assembled on
+// the host for the actor's rootfs, mirroring teardownActor: it sweeps the
+// sandbox state (detaching the merged rootfs overlays), removes the rootfs
+// upper dir re-materialized from the snapshot, and detaches the bundle rootfs
+// overlays mounted by buildActorContainers. The caller must have stopped the
+// actor's VMM and virtiofsd and drained the upper dir's untar first.
+func (s *AteWorkerService) cleanupFailedRestoreRootfs(ctx context.Context, actorUID string, actorDirs *ateworkerpb.ActorDirs) {
+	s.cleanupSandboxState(ctx, actorUID)
+	if err := os.RemoveAll(rootfsUpperDir(actorDirs)); err != nil {
+		slog.WarnContext(ctx, "Failed to remove rootfs upper dir after Restore failure", slog.String("actorUID", actorUID), slog.Any("err", err))
+	}
+	if err := imagecache.UnmountAllUnder(actorDirs.GetOciBundleDir()); err != nil {
+		slog.WarnContext(ctx, "Failed to unmount bundle rootfs overlays after Restore failure", slog.String("actorUID", actorUID), slog.Any("err", err))
+	}
+}
+
+// restoreGuestReadyError classifies a failure to resume the restored micro-VM or
+// reach its kata-agent before the workload serves any inbound traffic. Because
+// the restoreMemoryFidelity and RestoreWorkload defers tear down the VMM,
+// virtiofsd, rootfs mounts, network, and hosted-actor slot on the way out, the
+// failed attempt leaves no worker-local state behind and is safe for the caller
+// to retry (re-staging the snapshot if it was dropped above). When the caller's
+// own context ended, wrap ctx.Err() so the server reports the context status
+// instead.
+//
+// The guest did run, though: after Resume, it and the workload in it run while
+// the agent is dialed and the CRNG reseeded (up to about 15s plus
+// reseedTimeout). Nothing routes inbound traffic to it yet (not even the wakeup
+// probe), and atunnel's egress proxy closes its outbound TCP connections until
+// tunnel.ActivateEgress, which restoreMemoryFidelity calls after the reseed for
+// that reason, but a background task in the guest can query the DNS relay or
+// write to its filesystems. The retry re-extracts the rootfs upper and
+// durable-dir volumes from the snapshot, whereas a CSI volume is outside the
+// snapshot and keeps any writes made during that window while guest memory and
+// its page cache resume from the snapshot; we accept that narrow window over
+// crashing the actor on a transient host stall. When the reseed is what failed,
+// the guest also ran on CRNG state shared with the snapshot's other clones.
+//
+// A guest found stopped while dialing the agent (errGuestStopped:
+// cloud-hypervisor exited, e.g. a guest kernel panic after resume or a corrupt
+// memory image) is not reported as Unavailable: the same snapshot would likely
+// stop the guest again on every retry. coldBootActorRetrying likewise caps
+// retries of that case, at coldBootAttempts. A stop that surfaces in Resume or
+// the reseed instead is reported as Unavailable, and the caller's limit on
+// consecutive retryable failures bounds it.
+func restoreGuestReadyError(ctx context.Context, step string, err error) error {
+	if ctx.Err() != nil {
+		return fmt.Errorf("while %s: %v: %w", step, err, ctx.Err())
+	}
+	if errors.Is(err, errGuestStopped) {
+		return fmt.Errorf("while %s: %w", step, err)
+	}
+	return apierror.Unavailable("while %s: %w", step, err)
 }
 
 // rewriteSnapshotPaths repoints the snapshot config.json's per-actor paths from

@@ -38,9 +38,9 @@ type Options struct {
 	PodcertWorkersPerSigner            int
 	EnvoyConcurrency                   int
 	ClusterSize                        string
-	CordonControlPlane                 bool
+	CordonSystemInfraComponents        bool
 	FakeDataPlane                      bool
-	IngressAuthMode                    string
+	E2ETuning                          bool
 	AdditionalEgressExtprocService     string
 	AdditionalEgressExtprocFiltersFile string
 	CredentialProvider                 string
@@ -90,7 +90,6 @@ func optionsFlagSet(opts Options) (*pflag.FlagSet, error) {
 		{"atenet-dataplane", opts.Router},
 		{"rollout-timeout", opts.RolloutTimeout},
 		{"cluster-size", opts.ClusterSize},
-		{"ingress-auth-mode", opts.IngressAuthMode},
 		{"experimental-additional-egress-extproc-service", opts.AdditionalEgressExtprocService},
 		{"experimental-additional-egress-extproc-filters-file", opts.AdditionalEgressExtprocFiltersFile},
 		{"credential-provider", opts.CredentialProvider},
@@ -107,8 +106,9 @@ func optionsFlagSet(opts Options) (*pflag.FlagSet, error) {
 		val  bool
 	}{
 		{"kind", opts.Kind},
-		{"cordon-control-plane", opts.CordonControlPlane},
+		{"cordon-system-infra-components", opts.CordonSystemInfraComponents},
 		{"fake-data-plane", opts.FakeDataPlane},
+		{"e2e-tuning", opts.E2ETuning},
 	} {
 		if kv.val {
 			if err := fs.Set(kv.flag, "true"); err != nil {

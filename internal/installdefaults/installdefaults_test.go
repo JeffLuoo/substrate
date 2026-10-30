@@ -79,6 +79,26 @@ func TestControllerSPIFFEID(t *testing.T) {
 	}
 }
 
+func TestAPIServerSPIFFEID(t *testing.T) {
+	// Matches the --api-server-sidecar-spiffe-id default ate-api-server ships
+	// with, the identity its pod presents on the loopback.
+	const want = "spiffe://cluster.local/ns/ate-system/sa/ate-api-server"
+	if got := APIServerSPIFFEID(SystemNamespace); got != want {
+		t.Errorf("APIServerSPIFFEID(%q) = %q, want %q", SystemNamespace, got, want)
+	}
+}
+
+func TestAPIServiceHost(t *testing.T) {
+	for _, tt := range []struct{ namespace, want string }{
+		{"ate-system", "api.ate-system.svc"},
+		{"substrate-prod", "api.substrate-prod.svc"},
+	} {
+		if got := APIServiceHost(tt.namespace); got != tt.want {
+			t.Errorf("APIServiceHost(%q) = %q, want %q", tt.namespace, got, tt.want)
+		}
+	}
+}
+
 func TestActorJWTIssuer(t *testing.T) {
 	tests := []struct {
 		name      string

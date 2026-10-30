@@ -25,13 +25,14 @@ import (
 	"sync"
 	"time"
 
+	atev1 "go.ate.dev/substrate/api/infra/k8s/ate/v1"
 	"go.ate.dev/substrate/cmd/ateworker-microvm/internal/agentstats"
 	"go.ate.dev/substrate/cmd/ateworker-microvm/internal/third_party/kata/agentpb"
 	"go.ate.dev/substrate/internal/apierror"
 	"go.ate.dev/substrate/internal/ateattr"
+	"go.ate.dev/substrate/internal/ateworkervalidation"
 	"go.ate.dev/substrate/internal/proto/ateworkerpb"
 	"go.ate.dev/substrate/internal/resources"
-	atev1alpha1 "go.ate.dev/substrate/pkg/api/v1alpha1"
 )
 
 // statsCallTimeout bounds one container's guest-agent call. The RPC is polled
@@ -102,8 +103,8 @@ type guestStatsTarget struct {
 // cold boot, snapshot, or restore; blocking there would silence the poller
 // through the phases whose usage matters most.
 func (s *AteWorkerService) GetWorkloadStats(ctx context.Context, req *ateworkerpb.GetWorkloadStatsRequest) (*ateworkerpb.GetWorkloadStatsResponse, error) {
-	if req.GetActorUid() == "" {
-		return nil, apierror.InvalidArgument("actor_uid is required")
+	if err := ateworkervalidation.ValidateGetWorkloadStatsRequest(ctx, req); err != nil {
+		return nil, err
 	}
 
 	// NOT_FOUND rather than FAILED_PRECONDITION: the requested actor is not
@@ -309,7 +310,7 @@ func pendingSample(active *resources.ActorAttribution) *ateworkerpb.WorkloadStat
 		ActorTemplateAtespace: active.TemplateAtespace,
 		ActorTemplateName:     active.TemplateName,
 
-		SandboxClass: string(atev1alpha1.SandboxClassMicroVM),
+		SandboxClass: string(atev1.SandboxClassMicroVM),
 
 		ObservedAtUnixNano: time.Now().UnixNano(),
 	}
@@ -367,7 +368,7 @@ func (s *AteWorkerService) sampleGuest(ctx context.Context, h *hostedActor) (*at
 		ActorTemplateAtespace: active.TemplateAtespace,
 		ActorTemplateName:     active.TemplateName,
 
-		SandboxClass: string(atev1alpha1.SandboxClassMicroVM),
+		SandboxClass: string(atev1.SandboxClassMicroVM),
 		Source:       ateworkerpb.StatsSource_STATS_SOURCE_GUEST_AGENT,
 
 		MemoryCurrentBytes:    sample.MemoryCurrentBytes,
@@ -397,9 +398,11 @@ func (s *AteWorkerService) sampleGuest(ctx context.Context, h *hostedActor) (*at
 // every container answered, so a deadline never yields a partial sum.
 //
 // The loop as a whole is bounded by ctx — the caller's RPC deadline — with
-// maxActorContainers * statsCallTimeout as the ceiling when the caller set
-// none. statsCallTimeout is per call so that one hung container read cannot
-// eat the budget the remaining containers still need.
+// the WorkloadSpec.containers bound (ten, its +k8s:maxItems tag) times
+// statsCallTimeout as the ceiling when the caller set none, since validation
+// caps the spec before anything boots. statsCallTimeout is per call so that
+// one hung container read cannot eat the budget the remaining containers
+// still need.
 func sumContainerStats(ctx context.Context, target *guestStatsTarget) (agentstats.Sample, map[string]uint64, error) {
 	var (
 		total   agentstats.Sample

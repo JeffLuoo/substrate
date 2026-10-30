@@ -17,6 +17,7 @@
 package ocispec
 
 import (
+	"cmp"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -32,8 +33,8 @@ import (
 // specFile is the OCI spec file name within a bundle.
 const specFile = "config.json"
 
-// hostname is the UTS hostname for actor containers.
-const hostname = "actor"
+// Hostname is the UTS hostname for actor containers.
+const Hostname = "actor"
 
 // Options describes one actor container.
 type Options struct {
@@ -60,20 +61,47 @@ const (
 // ociResources maps the resolved limits onto the OCI spec's linux.resources.
 // Returns nil when nothing is set, so the spec carries no linux.resources at
 // all for a container that declares no limits.
-func ociResources(r *ateworkerpb.ResourceLimits) *specs.LinuxResources {
-	if r == nil || (r.GetMemoryBytes() <= 0 && r.GetCpuMillis() <= 0) {
+func ociResources(r *ateworkerpb.ResourceRequirements) *specs.LinuxResources {
+	l := r.GetLimits()
+	if l.GetMemoryBytes() <= 0 && l.GetCpuMillicores() <= 0 {
 		return nil
 	}
 	out := &specs.LinuxResources{}
-	if b := r.GetMemoryBytes(); b > 0 {
+	if b := l.GetMemoryBytes(); b > 0 {
 		out.Memory = &specs.LinuxMemory{Limit: &b}
 	}
-	if m := r.GetCpuMillis(); m > 0 {
+	if m := l.GetCpuMillicores(); m > 0 {
 		quota := max(m*cpuQuotaPeriodUS/1000, cpuQuotaMinUS)
 		period := uint64(cpuQuotaPeriodUS)
 		out.CPU = &specs.LinuxCPU{Quota: &quota, Period: &period}
 	}
 	return out
+}
+
+// BuildSandbox returns the OCI spec of a sandbox with no root container: the
+// hostname and namespaces, and no process, rootfs, or mounts.
+func BuildSandbox(actorUID string) *specs.Spec {
+	return &specs.Spec{
+		Hostname: Hostname,
+		Linux:    &specs.Linux{Namespaces: namespaces(actorUID)},
+	}
+}
+
+// namespaces returns the namespaces of an actor's sandbox and containers. The
+// network namespace is the actor's.
+func namespaces(actorUID string) []specs.LinuxNamespace {
+	return []specs.LinuxNamespace{
+		{Type: "pid"},
+		{Type: "network", Path: nodepath.ActorNetNSPath(actorUID)},
+		{Type: "ipc"},
+		{Type: "uts"},
+		{Type: "mount"},
+	}
+}
+
+// processUser maps the resolved identity onto the OCI process. nil is root.
+func processUser(u *ateworkerpb.ProcessUser) specs.User {
+	return specs.User{UID: u.GetUid(), GID: u.GetGid(), AdditionalGids: u.GetAdditionalGids()}
 }
 
 // Build returns a runtime-neutral OCI spec for an actor container.
@@ -82,13 +110,10 @@ func Build(o Options) *specs.Spec {
 	containerSpec := container.GetContainerSpec()
 	spec := &specs.Spec{
 		Process: &specs.Process{
-			User: specs.User{
-				UID: 0,
-				GID: 0,
-			},
+			User: processUser(containerSpec.GetUser()),
 			Args: containerSpec.GetArgs(),
 			Env:  containerSpec.GetEnv(),
-			Cwd:  "/",
+			Cwd:  cmp.Or(containerSpec.GetCwd(), "/"),
 			Capabilities: &specs.LinuxCapabilities{
 				Bounding:  containerSpec.GetCapabilities(),
 				Effective: containerSpec.GetCapabilities(),
@@ -112,7 +137,7 @@ func Build(o Options) *specs.Spec {
 			Path:     "rootfs",
 			Readonly: false,
 		},
-		Hostname: hostname,
+		Hostname: Hostname,
 		Mounts: []specs.Mount{
 			{
 				Destination: "/proc",
@@ -137,25 +162,8 @@ func Build(o Options) *specs.Spec {
 			},
 		},
 		Linux: &specs.Linux{
-			Namespaces: []specs.LinuxNamespace{
-				{
-					Type: "pid",
-				},
-				{
-					Type: "network",
-					Path: nodepath.ActorNetNSPath(o.ActorUID),
-				},
-				{
-					Type: "ipc",
-				},
-				{
-					Type: "uts",
-				},
-				{
-					Type: "mount",
-				},
-			},
-			Resources: ociResources(containerSpec.GetResources()),
+			Namespaces: namespaces(o.ActorUID),
+			Resources:  ociResources(containerSpec.GetResources()),
 		},
 	}
 

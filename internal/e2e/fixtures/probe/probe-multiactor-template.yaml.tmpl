@@ -48,10 +48,5 @@ volumes:
 # Allow multiple actors to fit on one worker.
 resources:
   limits:
-  - name: cpu
-    quantity: "1"
-  - name: memory
-    quantity: 256Mi
-${TEMPLATE_SANDBOX_CONFIG}
-snapshotConfig:
-  storageLocation: gs://${BUCKET_NAME}/ate-e2e${FIXTURE_SUFFIX}/
+    cpuMillicores: 1000
+    memoryBytes: 268435456 # 256Mi

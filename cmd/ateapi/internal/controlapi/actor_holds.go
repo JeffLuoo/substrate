@@ -25,6 +25,7 @@ import (
 	"strings"
 	"time"
 
+	"go.ate.dev/substrate/api/ateapi/v1"
 	"go.ate.dev/substrate/cmd/ateapi/internal/apivalidation"
 	"go.ate.dev/substrate/cmd/ateapi/internal/store"
 	"go.ate.dev/substrate/internal/actorevent"
@@ -32,7 +33,6 @@ import (
 	"go.ate.dev/substrate/internal/ateattr"
 	"go.ate.dev/substrate/internal/principal"
 	"go.ate.dev/substrate/internal/resources"
-	"go.ate.dev/substrate/pkg/proto/ateapipb"
 	"google.golang.org/genproto/googleapis/rpc/errdetails"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/protobuf/proto"
@@ -70,7 +70,7 @@ var (
 
 // actorHeldError is the FAILED_PRECONDITION every resume of a held actor
 // returns.
-func actorHeldError(actorRef resources.ActorRef, holds []*ateapipb.ActorHold) error {
+func actorHeldError(actorRef resources.ActorRef, holds []*ateapi.ActorHold) error {
 	h := holds[0]
 	info := &errdetails.ErrorInfo{
 		Reason:   ActorHeldReason,
@@ -159,7 +159,7 @@ func (s *RPCService) checkMetadataWriter(ctx context.Context, keys ...string) er
 // mutateActor applies mutate to a fresh read of the actor, retrying when a
 // concurrent write wins the version race. mutate reports whether it changed
 // anything; an unchanged actor is returned without a write.
-func (s *RPCService) mutateActor(ctx context.Context, actorRef resources.ActorRef, mutate func(*ateapipb.Actor) (bool, error)) (_ *ateapipb.Actor, changed bool, err error) {
+func (s *RPCService) mutateActor(ctx context.Context, actorRef resources.ActorRef, mutate func(*ateapi.Actor) (bool, error)) (_ *ateapi.Actor, changed bool, err error) {
 	for attempt := 0; ; attempt++ {
 		current, err := s.impl.GetActor(ctx, actorRef)
 		if err != nil {
@@ -171,7 +171,7 @@ func (s *RPCService) mutateActor(ctx context.Context, actorRef resources.ActorRe
 		} else if !changed {
 			return current, false, nil
 		}
-		stored, err := s.impl.UpdateActor(ctx, actorRef, store.PreconditionFrom(current), func(toUpdate *ateapipb.Actor) error {
+		stored, err := s.impl.UpdateActor(ctx, actorRef, store.PreconditionFrom(current), func(toUpdate *ateapi.Actor) error {
 			_, err := mutate(toUpdate)
 			return err
 		})
@@ -185,7 +185,7 @@ func (s *RPCService) mutateActor(ctx context.Context, actorRef resources.ActorRe
 	}
 }
 
-func (s *RPCService) SetActorLabels(ctx context.Context, req *ateapipb.SetActorLabelsRequest) (*ateapipb.Actor, error) {
+func (s *RPCService) SetActorLabels(ctx context.Context, req *ateapi.SetActorLabelsRequest) (*ateapi.Actor, error) {
 	if errs := apivalidation.ValidateSetActorLabelsRequest(ctx, req); len(errs) > 0 {
 		return nil, resources.ToAPIError(errs)
 	}
@@ -196,7 +196,7 @@ func (s *RPCService) SetActorLabels(ctx context.Context, req *ateapipb.SetActorL
 		return nil, err
 	}
 
-	stored, changed, err := s.mutateActor(ctx, actorRef, func(a *ateapipb.Actor) (bool, error) {
+	stored, changed, err := s.mutateActor(ctx, actorRef, func(a *ateapi.Actor) (bool, error) {
 		before := maps.Clone(a.GetLabels())
 		if a.Labels == nil {
 			a.Labels = map[string]string{}
@@ -220,7 +220,7 @@ func (s *RPCService) SetActorLabels(ctx context.Context, req *ateapipb.SetActorL
 	return stored, nil
 }
 
-func (s *RPCService) AddActorHold(ctx context.Context, req *ateapipb.AddActorHoldRequest) (*ateapipb.Actor, error) {
+func (s *RPCService) AddActorHold(ctx context.Context, req *ateapi.AddActorHoldRequest) (*ateapi.Actor, error) {
 	if errs := apivalidation.ValidateAddActorHoldRequest(ctx, req); len(errs) > 0 {
 		return nil, resources.ToAPIError(errs)
 	}
@@ -236,9 +236,9 @@ func (s *RPCService) AddActorHold(ctx context.Context, req *ateapipb.AddActorHol
 	}
 	now := timestamppb.Now()
 
-	stored, changed, err := s.mutateActor(ctx, actorRef, func(a *ateapipb.Actor) (bool, error) {
+	stored, changed, err := s.mutateActor(ctx, actorRef, func(a *ateapi.Actor) (bool, error) {
 		if a.Status == nil {
-			a.Status = &ateapipb.ActorStatus{}
+			a.Status = &ateapi.ActorStatus{}
 		}
 		for _, h := range a.Status.Holds {
 			if h.GetName() == in.GetName() {
@@ -249,7 +249,7 @@ func (s *RPCService) AddActorHold(ctx context.Context, req *ateapipb.AddActorHol
 				return true, nil
 			}
 		}
-		a.Status.Holds = append(a.Status.Holds, &ateapipb.ActorHold{
+		a.Status.Holds = append(a.Status.Holds, &ateapi.ActorHold{
 			Name:      in.GetName(),
 			Reason:    in.GetReason(),
 			CreatedBy: createdBy,
@@ -267,7 +267,7 @@ func (s *RPCService) AddActorHold(ctx context.Context, req *ateapipb.AddActorHol
 	// A hold means desired state SUSPENDED, so the hold's owner never calls
 	// SuspendActor itself.
 	switch stored.GetStatus().GetState() {
-	case ateapipb.ActorState_ACTOR_STATE_RUNNING, ateapipb.ActorState_ACTOR_STATE_RESUMING, ateapipb.ActorState_ACTOR_STATE_SUSPENDING:
+	case ateapi.ActorState_ACTOR_STATE_RUNNING, ateapi.ActorState_ACTOR_STATE_RESUMING, ateapi.ActorState_ACTOR_STATE_SUSPENDING:
 		syncCtx, cancel := context.WithTimeout(ctx, holdSuspendSyncTimeout)
 		suspended, err := s.actorWorkflow.suspendHeld(syncCtx, actorRef)
 		cancel()
@@ -283,7 +283,7 @@ func (s *RPCService) AddActorHold(ctx context.Context, req *ateapipb.AddActorHol
 	return stored, nil
 }
 
-func (s *RPCService) RemoveActorHold(ctx context.Context, req *ateapipb.RemoveActorHoldRequest) (*ateapipb.Actor, error) {
+func (s *RPCService) RemoveActorHold(ctx context.Context, req *ateapi.RemoveActorHoldRequest) (*ateapi.Actor, error) {
 	if errs := apivalidation.ValidateRemoveActorHoldRequest(ctx, req); len(errs) > 0 {
 		return nil, resources.ToAPIError(errs)
 	}
@@ -293,10 +293,10 @@ func (s *RPCService) RemoveActorHold(ctx context.Context, req *ateapipb.RemoveAc
 		return nil, err
 	}
 
-	var removed *ateapipb.ActorHold
-	stored, changed, err := s.mutateActor(ctx, actorRef, func(a *ateapipb.Actor) (bool, error) {
+	var removed *ateapi.ActorHold
+	stored, changed, err := s.mutateActor(ctx, actorRef, func(a *ateapi.Actor) (bool, error) {
 		holds := a.GetStatus().GetHolds()
-		i := slices.IndexFunc(holds, func(h *ateapipb.ActorHold) bool { return h.GetName() == req.GetHoldName() })
+		i := slices.IndexFunc(holds, func(h *ateapi.ActorHold) bool { return h.GetName() == req.GetHoldName() })
 		if i < 0 {
 			return false, nil
 		}
@@ -314,17 +314,17 @@ func (s *RPCService) RemoveActorHold(ctx context.Context, req *ateapipb.RemoveAc
 	return stored, nil
 }
 
-func holdNamed(actor *ateapipb.Actor, name string) *ateapipb.ActorHold {
+func holdNamed(actor *ateapi.Actor, name string) *ateapi.ActorHold {
 	for _, h := range actor.GetStatus().GetHolds() {
 		if h.GetName() == name {
 			return h
 		}
 	}
-	return &ateapipb.ActorHold{Name: name}
+	return &ateapi.ActorHold{Name: name}
 }
 
 // logActorLabelsChanged records the actor's labels after a change.
-func logActorLabelsChanged(ctx context.Context, actor *ateapipb.Actor) {
+func logActorLabelsChanged(ctx context.Context, actor *ateapi.Actor) {
 	attrs := ateattr.ActorLogAttrs(resources.ActorAttributionFromActor(actor))
 	attrs = append(attrs, slog.String(string(ateattr.ActorLabelsKey), ateattr.ActorLabelsValue(actor.GetLabels())))
 	actorevent.Log(ctx, actorevent.LabelsChanged, attrs)
@@ -332,7 +332,7 @@ func logActorLabelsChanged(ctx context.Context, actor *ateapipb.Actor) {
 
 // logActorHoldChanged records a hold added to or removed from actor, with the
 // state the actor was in at the commit.
-func logActorHoldChanged(ctx context.Context, actor *ateapipb.Actor, hold *ateapipb.ActorHold, action string) {
+func logActorHoldChanged(ctx context.Context, actor *ateapi.Actor, hold *ateapi.ActorHold, action string) {
 	attrs := ateattr.ActorLogAttrs(resources.ActorAttributionFromActor(actor))
 	attrs = append(attrs,
 		slog.String(string(ateattr.ActorHoldNameKey), hold.GetName()),
@@ -351,8 +351,8 @@ func logActorHoldChanged(ctx context.Context, actor *ateapipb.Actor, hold *ateap
 // suspendHeld runs the suspend workflow until the actor is asleep or no
 // longer held, retrying while another operation holds the actor's lease or a
 // resume is still settling. It returns the last actor it read.
-func (w *ActorWorkflow) suspendHeld(ctx context.Context, actorRef resources.ActorRef) (*ateapipb.Actor, error) {
-	var last *ateapipb.Actor
+func (w *ActorWorkflow) suspendHeld(ctx context.Context, actorRef resources.ActorRef) (*ateapi.Actor, error) {
+	var last *ateapi.Actor
 	err := wait.ExponentialBackoffWithContext(ctx, holdSuspendBackoff, func(ctx context.Context) (bool, error) {
 		actor, err := w.store.GetActor(ctx, actorRef)
 		if err != nil {
@@ -363,8 +363,8 @@ func (w *ActorWorkflow) suspendHeld(ctx context.Context, actorRef resources.Acto
 			return true, nil
 		}
 		switch actor.GetStatus().GetState() {
-		case ateapipb.ActorState_ACTOR_STATE_RUNNING, ateapipb.ActorState_ACTOR_STATE_SUSPENDING:
-			suspended, err := w.SuspendActor(ctx, actorRef)
+		case ateapi.ActorState_ACTOR_STATE_RUNNING, ateapi.ActorState_ACTOR_STATE_SUSPENDING:
+			suspended, err := w.SuspendActor(ctx, actorRef, suspendSync)
 			if err == nil {
 				last = suspended
 				return true, nil
@@ -375,7 +375,7 @@ func (w *ActorWorkflow) suspendHeld(ctx context.Context, actorRef resources.Acto
 			default:
 				return false, err
 			}
-		case ateapipb.ActorState_ACTOR_STATE_RESUMING:
+		case ateapi.ActorState_ACTOR_STATE_RESUMING:
 			// The resume in flight holds the lease; suspend once it settles.
 			return false, nil
 		default:

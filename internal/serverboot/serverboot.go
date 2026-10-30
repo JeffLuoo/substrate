@@ -28,6 +28,7 @@ import (
 	"net/http"
 	"os"
 	"slices"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -47,9 +48,10 @@ import (
 	"go.opentelemetry.io/otel/propagation"
 	"go.opentelemetry.io/otel/sdk/instrumentation"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
+	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 	"go.opentelemetry.io/otel/sdk/resource"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
-	semconv "go.opentelemetry.io/otel/semconv/v1.40.0"
+	semconv "go.opentelemetry.io/otel/semconv/v1.43.0"
 	"google.golang.org/grpc"
 )
 
@@ -117,7 +119,8 @@ func newResource(ctx context.Context, serviceName string, extraAttrs ...attribut
 //
 // The distinction matters because a nil conn on a relay-capable component is
 // exactly the degraded case worth alerting on: the worker asked for the relay,
-// could not dial it, and is now exporting over the worker pod's own network.
+// could not dial it, and is now exporting over the worker pod's own network,
+// or not at all without an OTLP endpoint (see hasOTLPDestination).
 // Collapsing that into the same "no attribute" bucket as atecontroller would
 // hide it.
 func relayAttrs(relayCapable bool, conn *grpc.ClientConn) []attribute.KeyValue {
@@ -182,7 +185,9 @@ func InitTracing(ctx context.Context, opts TracingOptions) (*sdktrace.TracerProv
 	// Without an exporter the provider still samples and propagates trace
 	// context, so a component that exports nothing keeps the traces of the
 	// components around it whole.
-	export := tracesPushEnabled(ctx)
+	reason, level := otlpExportBlocked(tracesPushEnabled(ctx),
+		hasOTLPDestination(tracesEndpointEnv, opts.RelayCapable, opts.ExporterConn))
+	export := reason == ""
 	if export {
 		expOpts := []otlptracegrpc.Option{
 			// GKE managed traces doesn't support validating the TLS certs of the collector.
@@ -203,16 +208,57 @@ func InitTracing(ctx context.Context, opts TracingOptions) (*sdktrace.TracerProv
 	tp := sdktrace.NewTracerProvider(tpOpts...)
 	otel.SetTracerProvider(tp)
 	otel.SetTextMapPropagator(propagation.TraceContext{})
-	slog.InfoContext(ctx, "Tracing initialized",
+	attrs := []any{
 		slog.String("sampler", opts.Sampling.Sampler().Description()),
-		slog.Bool("export", export))
+		slog.Bool("export", export),
+	}
+	if !export {
+		attrs = append(attrs, slog.String("reason", reason))
+	}
+	slog.Log(ctx, level, "Tracing initialized", attrs...)
 	return tp, nil
 }
 
 const (
 	metricsExporterEnv = "OTEL_METRICS_EXPORTER"
 	tracesExporterEnv  = "OTEL_TRACES_EXPORTER"
+
+	otlpEndpointEnv    = "OTEL_EXPORTER_OTLP_ENDPOINT"
+	tracesEndpointEnv  = "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT"
+	metricsEndpointEnv = "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT"
+	logsEndpointEnv    = "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT"
 )
+
+const (
+	reasonOTLPNotSelected = "otlp exporter not selected"
+	reasonNoDestination   = "no OTLP relay or endpoint"
+)
+
+// otlpExportBlocked returns why a signal does not export over OTLP, empty when
+// it does, and the level to log that at: Warn when otlp is selected but has
+// nowhere to go, since the component then loses that signal.
+func otlpExportBlocked(selected, hasDestination bool) (string, slog.Level) {
+	switch {
+	case !selected:
+		return reasonOTLPNotSelected, slog.LevelInfo
+	case !hasDestination:
+		return reasonNoDestination, slog.LevelWarn
+	default:
+		return "", slog.LevelInfo
+	}
+}
+
+// hasOTLPDestination reports whether a component has a collector to export
+// to. A relay-capable component (ateworker) without a relay connection
+// needs an OTLP endpoint, the generic one or signalEndpointEnv: a worker pod
+// runs no collector beside it, so the SDK's localhost:4317 default reaches
+// nothing. Every other component keeps that default.
+func hasOTLPDestination(signalEndpointEnv string, relayCapable bool, conn *grpc.ClientConn) bool {
+	if !relayCapable || conn != nil {
+		return true
+	}
+	return strings.TrimSpace(os.Getenv(otlpEndpointEnv)) != "" || strings.TrimSpace(os.Getenv(signalEndpointEnv)) != ""
+}
 
 // metricsExporters applies OTEL_METRICS_EXPORTER with the shared exporter
 // rules. prometheus, the specification's pull exporter, is known only when
@@ -262,10 +308,11 @@ func InitMetrics(ctx context.Context, serviceName string) (*sdkmetric.MeterProvi
 // InitMetricsBridged is for a binary whose scraped endpoint serves a registry
 // it does not own (atecontroller: controller-runtime's), so every metric
 // reaches the backend exactly once on whichever path is active. With the OTLP
-// export, reg is bridged onto the push and the OTel instruments stay off it,
-// since the bridge would otherwise push them a second time. With prometheus
-// alone, nothing is pushed and the OTel instruments register on reg, so its
-// endpoint serves both.
+// export, reg is bridged onto the push and the OTel instruments are pushed
+// natively. With the scraped endpoint on too, the instruments also register on
+// reg, and the bridge skips them so the push does not carry them twice. With
+// prometheus alone, nothing is pushed and the instruments register on reg, so
+// its endpoint serves both.
 //
 // servePull reports whether OTEL_METRICS_EXPORTER leaves the scraped endpoint
 // on, which the caller must then serve from reg: unset, prometheus, or a list
@@ -282,26 +329,72 @@ func InitMetricsBridged(ctx context.Context, serviceName string, reg interface {
 	}
 	exporters := metricsExporters(ctx, true)
 	servePull = exporters.Has(exporterPrometheus)
-	switch {
-	case exporters.Has(ExporterOTLP):
-		producer := prombridge.NewMetricProducer(prombridge.WithGatherer(reg))
-		if wrapProducer != nil {
-			producer = wrapProducer(producer)
+	push := exporters.Has(ExporterOTLP)
+
+	var producers []sdkmetric.Producer
+	var readers []sdkmetric.Reader
+	var bridge sdkmetric.Producer
+	if push {
+		bridge = prombridge.NewMetricProducer(prombridge.WithGatherer(reg))
+	}
+	if servePull {
+		registerer := promclient.Registerer(reg)
+		var own *promclient.Registry
+		if push {
+			// own holds only the instruments, so the bridge can tell which of
+			// reg's families are not its to push. reg serves own as well.
+			own = promclient.NewRegistry()
+			registerer = own
 		}
-		mp, err = newMeterProvider(ctx, serviceName, true, false, nil, []sdkmetric.Producer{producer})
-	case servePull:
-		var promReader *prometheus.Exporter
-		if promReader, err = prometheus.New(prometheus.WithRegisterer(reg)); err != nil {
+		promReader, err := prometheus.New(prometheus.WithRegisterer(registerer))
+		if err != nil {
 			return nil, false, fmt.Errorf("create Prometheus metric exporter: %w", err)
 		}
-		mp, err = newMeterProvider(ctx, serviceName, false, false, nil, nil, promReader)
-	default:
-		mp, err = newMeterProvider(ctx, serviceName, false, false, nil, nil)
+		if own != nil {
+			if err := reg.Register(own); err != nil {
+				return nil, false, fmt.Errorf("serve the OTel instruments from the registry: %w", err)
+			}
+			bridge = skipFamilies{inner: bridge, skip: own}
+		}
+		readers = append(readers, promReader)
 	}
+	if push {
+		if wrapProducer != nil {
+			bridge = wrapProducer(bridge)
+		}
+		producers = append(producers, bridge)
+	}
+	mp, err = newMeterProvider(ctx, serviceName, push, false, nil, producers, readers...)
 	if err != nil {
 		return nil, false, err
 	}
 	return mp, servePull, nil
+}
+
+// skipFamilies drops the metrics of inner named like a family skip gathers. A
+// failed gather drops inner's batch rather than risk pushing a metric twice,
+// and goes to the OTel error handler so the other metrics still push.
+type skipFamilies struct {
+	inner sdkmetric.Producer
+	skip  promclient.Gatherer
+}
+
+func (p skipFamilies) Produce(ctx context.Context) ([]metricdata.ScopeMetrics, error) {
+	scopes, err := p.inner.Produce(ctx)
+	// Gathered after inner, so skip covers every family inner saw.
+	families, gerr := p.skip.Gather()
+	if gerr != nil {
+		otel.Handle(fmt.Errorf("gather the families to skip: %w", gerr))
+		return nil, err
+	}
+	skip := make(map[string]bool, len(families))
+	for _, f := range families {
+		skip[f.GetName()] = true
+	}
+	for i := range scopes {
+		scopes[i].Metrics = slices.DeleteFunc(scopes[i].Metrics, func(m metricdata.Metrics) bool { return skip[m.Name] })
+	}
+	return scopes, err
 }
 
 // InitMetricsPushOnlyVia is InitMetrics without the Prometheus reader, for a
@@ -332,7 +425,9 @@ func newMeterProvider(ctx context.Context, serviceName string, push, relayCapabl
 		return nil, fmt.Errorf("create metric resource: %w", err)
 	}
 	opts := []sdkmetric.Option{sdkmetric.WithResource(res), sdkmetric.WithView(dropRPCServerAddress)}
-	if push {
+	reason, level := otlpExportBlocked(push, hasOTLPDestination(metricsEndpointEnv, relayCapable, conn))
+	export := reason == ""
+	if export {
 		expOpts := []otlpmetricgrpc.Option{
 			// GKE managed metrics doesn't support validating the TLS certs of the collector.
 			otlpmetricgrpc.WithInsecure(),
@@ -357,6 +452,11 @@ func newMeterProvider(ctx context.Context, serviceName string, push, relayCapabl
 	}
 	mp := sdkmetric.NewMeterProvider(opts...)
 	otel.SetMeterProvider(mp)
+	attrs := []any{slog.Bool("otlp_export", export)}
+	if !export {
+		attrs = append(attrs, slog.String("reason", reason))
+	}
+	slog.Log(ctx, level, "Metrics initialized", attrs...)
 	return mp, nil
 }
 

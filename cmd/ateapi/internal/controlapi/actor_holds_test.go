@@ -19,10 +19,10 @@ import (
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
+	"go.ate.dev/substrate/api/ateapi/v1"
 	"go.ate.dev/substrate/internal/apierror"
 	"go.ate.dev/substrate/internal/principal"
 	"go.ate.dev/substrate/internal/resources"
-	"go.ate.dev/substrate/pkg/proto/ateapipb"
 	"google.golang.org/genproto/googleapis/rpc/errdetails"
 	"google.golang.org/grpc/codes"
 )
@@ -88,7 +88,7 @@ func TestCheckMetadataWriter(t *testing.T) {
 }
 
 func TestActorHeldError(t *testing.T) {
-	err := actorHeldError(resources.ActorRef{Atespace: "team-a", Name: "runner"}, []*ateapipb.ActorHold{
+	err := actorHeldError(resources.ActorRef{Atespace: "team-a", Name: "runner"}, []*ateapi.ActorHold{
 		{Name: "agent-cost/budget", Reason: "budget exhausted"},
 		{Name: "ax/loop"},
 	})

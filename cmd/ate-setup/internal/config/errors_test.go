@@ -253,9 +253,9 @@ func TestValidationErrorsNameTheSupplyingChannel(t *testing.T) {
 func TestCredentialProviderErrorNamesTheFileChannel(t *testing.T) {
 	useFixtures(t)
 	cfg := &Config{}
-	_, err := cfg.CredentialProvider()
+	_, err := cfg.CredentialProviders()
 	if err == nil {
-		t.Fatal("CredentialProvider() with nothing set returned no error")
+		t.Fatal("CredentialProviders() with nothing set returned no error")
 	}
 	for _, want := range []string{
 		"--credential-provider",

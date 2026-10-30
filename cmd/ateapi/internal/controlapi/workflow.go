@@ -20,7 +20,10 @@ import (
 	"fmt"
 	"log/slog"
 	"sync"
+	"time"
 
+	"go.ate.dev/substrate/api/ateapi/v1"
+	"go.ate.dev/substrate/api/objectstore/v1"
 	"go.ate.dev/substrate/cmd/ateapi/internal/scheduling"
 	"go.ate.dev/substrate/cmd/ateapi/internal/store"
 	"go.ate.dev/substrate/cmd/ateapi/internal/workercache"
@@ -29,9 +32,6 @@ import (
 	"go.ate.dev/substrate/internal/ateattr"
 	"go.ate.dev/substrate/internal/pluginsocket"
 	"go.ate.dev/substrate/internal/resources"
-	listersv1alpha1 "go.ate.dev/substrate/pkg/client/listers/api/v1alpha1"
-	"go.ate.dev/substrate/pkg/proto/ateapipb"
-	objectstorev1 "go.ate.dev/substrate/pkg/proto/objectstorepb/v1"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
@@ -82,17 +82,17 @@ func markSkipped(ctx context.Context, reason string) {
 //
 // Crashes go through logActorCrashed instead, so read the state off
 // ate.actor.state rather than off the message.
-func logActorStateChanged(ctx context.Context, actor *ateapipb.Actor, opName string, extra ...slog.Attr) {
+func logActorStateChanged(ctx context.Context, actor *ateapi.Actor, opName string, extra ...slog.Attr) {
 	logActorState(ctx, actor, opName, ateattr.ActorStateValue(actor.GetStatus().GetState()), extra...)
 }
 
 // logActorDeleted records the terminal transition. The row is gone, so there is
 // no committed state left to read and this is the one state named by hand.
-func logActorDeleted(ctx context.Context, actor *ateapipb.Actor, opName string, extra ...slog.Attr) {
+func logActorDeleted(ctx context.Context, actor *ateapi.Actor, opName string, extra ...slog.Attr) {
 	logActorState(ctx, actor, opName, ateattr.ActorStateDeleted, extra...)
 }
 
-func logActorState(ctx context.Context, actor *ateapipb.Actor, opName, state string, extra ...slog.Attr) {
+func logActorState(ctx context.Context, actor *ateapi.Actor, opName, state string, extra ...slog.Attr) {
 	attrs := ateattr.ActorLogAttrs(resources.ActorAttributionFromActor(actor))
 	attrs = append(attrs,
 		slog.String(string(ateattr.ActorOperationNameKey), ateattr.NormalizeOperationName(opName)),
@@ -103,7 +103,7 @@ func logActorState(ctx context.Context, actor *ateapipb.Actor, opName, state str
 }
 
 // appendActorLabels adds ate.actor.labels when the actor has labels.
-func appendActorLabels(attrs []slog.Attr, actor *ateapipb.Actor) []slog.Attr {
+func appendActorLabels(attrs []slog.Attr, actor *ateapi.Actor) []slog.Attr {
 	if len(actor.GetLabels()) == 0 {
 		return attrs
 	}
@@ -116,7 +116,7 @@ func appendActorLabels(attrs []slog.Attr, actor *ateapipb.Actor) []slog.Attr {
 // and memory reservations, and the worker pool identity and actor slot
 // capacity. Returns nil when the transition did not release a worker
 // assignment.
-func activationCloseAttrs(workerAssignment *ateapipb.WorkerAssignment, actorAssignment *ateapipb.ActorAssignment, tmpl *ateapipb.ActorTemplate) []slog.Attr {
+func activationCloseAttrs(workerAssignment *ateapi.WorkerAssignment, actorAssignment *ateapi.ActorAssignment, tmpl *ateapi.ActorTemplate) []slog.Attr {
 	if workerAssignment == nil && actorAssignment == nil {
 		return nil
 	}
@@ -129,16 +129,14 @@ func activationCloseAttrs(workerAssignment *ateapipb.WorkerAssignment, actorAssi
 		attrs = append(attrs, slog.Int64(string(ateattr.ActorEpochKey), ct.AsTime().UnixNano()))
 	}
 	res := actorAssignment.GetResources()
-	if len(res.GetLimits()) == 0 {
-		res = tmpl.GetResources()
+	if res.GetCpuMillicores() == 0 && res.GetMemoryBytes() == 0 {
+		res = tmpl.GetResources().GetLimits()
 	}
-	if quantities, err := resources.ParseQuantities(res); err == nil {
-		if cpuQ, ok := quantities[resources.ResourceCPU]; ok && !cpuQ.IsZero() {
-			attrs = append(attrs, slog.Float64(string(ateattr.ActorBookedCPUKey), cpuQ.AsApproximateFloat64()))
-		}
-		if memQ, ok := quantities[resources.ResourceMemory]; ok && !memQ.IsZero() {
-			attrs = append(attrs, slog.Int64(string(ateattr.ActorBookedMemoryKey), memQ.Value()))
-		}
+	if cpu := res.GetCpuMillicores(); cpu > 0 {
+		attrs = append(attrs, slog.Float64(string(ateattr.ActorBookedCPUKey), float64(cpu)/1000))
+	}
+	if mem := res.GetMemoryBytes(); mem > 0 {
+		attrs = append(attrs, slog.Int64(string(ateattr.ActorBookedMemoryKey), mem))
 	}
 	if ns, pool := workerAssignment.GetWorkerNamespace(), workerAssignment.GetWorkerPool(); ns != "" && pool != "" {
 		attrs = append(attrs,
@@ -157,17 +155,17 @@ func activationCloseAttrs(workerAssignment *ateapipb.WorkerAssignment, actorAssi
 // each exported method begins with preview.ContextWithOptIn: the request was
 // already validated, and what the workflow writes is the system's own state.
 type ActorWorkflow struct {
-	store                actorWorkflowStore
-	workerCache          *workercache.Cache
-	scheduler            scheduling.Scheduler
-	dialer               *AteletDialer
-	sandboxConfigLister  listersv1alpha1.SandboxConfigLister
-	storageClassLister   storagev1listers.StorageClassLister
-	instruments          *Instruments
-	egressGatewayAddress string
-	pluginRegistry       VolumePluginRegistry
-	objectStorePlugin    objectstorev1.ControlProviderClient
-	labelActorVolumes    bool
+	store                   actorWorkflowStore
+	workerCache             *workercache.Cache
+	scheduler               scheduling.Scheduler
+	dialer                  *AteletDialer
+	storageClassLister      storagev1listers.StorageClassLister
+	instruments             *Instruments
+	egressGatewayAddress    string
+	pluginRegistry          VolumePluginRegistry
+	objectStorePlugin       objectstore.ControlProviderClient
+	clusterSnapshotLocation string
+	labelActorVolumes       bool
 	// holdEnforcing holds the keys of actors with a background suspend
 	// under way for a hold, so a router retry storm starts at most one.
 	holdEnforcing sync.Map
@@ -182,19 +180,17 @@ func NewActorWorkflow(
 	store actorWorkflowStore,
 	workerCache *workercache.Cache,
 	dialer *AteletDialer,
-	sandboxConfigLister listersv1alpha1.SandboxConfigLister,
 	storageClassLister storagev1listers.StorageClassLister,
 	instruments *Instruments,
 	egressGatewayAddress string,
 	pluginRegistry VolumePluginRegistry,
-	objectStorePlugin objectstorev1.ControlProviderClient,
+	objectStorePlugin objectstore.ControlProviderClient,
 ) *ActorWorkflow {
 	return &ActorWorkflow{
 		store:                store,
 		workerCache:          workerCache,
 		scheduler:            scheduling.New(workerCache),
 		dialer:               dialer,
-		sandboxConfigLister:  sandboxConfigLister,
 		storageClassLister:   storageClassLister,
 		instruments:          instruments,
 		egressGatewayAddress: egressGatewayAddress,
@@ -203,41 +199,50 @@ func NewActorWorkflow(
 	}
 }
 
+// snapshotLocation returns the base object-storage URI actorTemplate's
+// snapshots are stored under; see resolveSnapshotLocation.
+func (w *ActorWorkflow) snapshotLocation(actorTemplate *ateapi.ActorTemplate) (string, error) {
+	return resolveSnapshotLocation(w.clusterSnapshotLocation, actorTemplate)
+}
+
 // cleanupSnapshot deletes every object under prefix through the control
 // object-store plugin.
 func (w *ActorWorkflow) cleanupSnapshot(ctx context.Context, prefix resources.StoragePrefix) error {
-	_, err := w.objectStorePlugin.CleanupSnapshot(ctx, &objectstorev1.CleanupSnapshotRequest{SnapshotUri: prefix.String()})
+	_, err := w.objectStorePlugin.CleanupSnapshot(ctx, &objectstore.CleanupSnapshotRequest{SnapshotUri: prefix.String()})
 	return pluginsocket.CallError(err)
 }
 
 // copySnapshot copies every object under src to dst through the control
 // object-store plugin.
 func (w *ActorWorkflow) copySnapshot(ctx context.Context, src, dst resources.StoragePrefix) error {
-	_, err := w.objectStorePlugin.CopySnapshot(ctx, &objectstorev1.CopySnapshotRequest{SrcUri: src.String(), DstUri: dst.String()})
+	_, err := w.objectStorePlugin.CopySnapshot(ctx, &objectstore.CopySnapshotRequest{SrcUri: src.String(), DstUri: dst.String()})
 	return pluginsocket.CallError(err)
 }
 
 // actorWorkflowStore enumerates the exact storage methods needed by
 // ActorWorkflow and nothing more.
 type actorWorkflowStore interface {
-	GetActor(ctx context.Context, actorRef resources.ActorRef) (*ateapipb.Actor, error)
-	UpdateActor(ctx context.Context, actorRef resources.ActorRef, precondition store.Precondition, mutate func(toUpdate *ateapipb.Actor) error) (*ateapipb.Actor, error)
-	DeleteActor(ctx context.Context, actorRef resources.ActorRef, precondition store.DeletePreconditions) (*ateapipb.Actor, error)
-	GetWorker(ctx context.Context, name string) (*ateapipb.Worker, error)
-	UpdateWorker(ctx context.Context, name string, precondition store.Precondition, mutate func(toUpdate *ateapipb.Worker) error) (*ateapipb.Worker, error)
-	BindActorToWorker(ctx context.Context, workerName string, assignment *ateapipb.ActorAssignment, admit func(*ateapipb.Worker) error) error
-	ReleaseActorFromWorker(ctx context.Context, workerName string, actorUID string) (*ateapipb.Worker, error)
-	GetWorkerAssignment(ctx context.Context, workerName, actorUID string) (*ateapipb.ActorAssignment, error)
+	GetActor(ctx context.Context, actorRef resources.ActorRef) (*ateapi.Actor, error)
+	UpdateActor(ctx context.Context, actorRef resources.ActorRef, precondition store.Precondition, mutate func(toUpdate *ateapi.Actor) error) (*ateapi.Actor, error)
+	MarkActorForDeletion(ctx context.Context, actorRef resources.ActorRef, precondition store.DeletePreconditions, mutate func(toUpdate *ateapi.Actor) error) (*ateapi.Actor, error)
+	DeleteActor(ctx context.Context, actorRef resources.ActorRef, precondition store.DeletePreconditions) (*ateapi.Actor, error)
+	GetWorker(ctx context.Context, name string) (*ateapi.Worker, error)
+	UpdateWorker(ctx context.Context, name string, precondition store.Precondition, mutate func(toUpdate *ateapi.Worker) error) (*ateapi.Worker, error)
+	BindActorToWorker(ctx context.Context, workerName string, assignment *ateapi.ActorAssignment, admit func(*ateapi.Worker) error) error
+	ReleaseActorFromWorker(ctx context.Context, workerName string, actorUID string) (*ateapi.Worker, error)
+	GetWorkerAssignment(ctx context.Context, workerName, actorUID string) (*ateapi.ActorAssignment, error)
 	FindWorkerHostingActor(ctx context.Context, actorUID string) (string, error)
 	// Read from the records rather than the Worker's status: only the service
 	// layer attaches assignments on read, and this workflow holds the store.
-	ListWorkerAssignments(ctx context.Context, workerName string, opts store.ListOptions) (store.ListResponse[*ateapipb.ActorAssignment], error)
-	CreateTag(ctx context.Context, tag *ateapipb.Tag) (*ateapipb.Tag, error)
-	GetTag(ctx context.Context, tagRef resources.TagRef) (*ateapipb.Tag, error)
-	UpdateTag(ctx context.Context, tagRef resources.TagRef, precondition store.Precondition, mutate func(toUpdate *ateapipb.Tag) error) (*ateapipb.Tag, error)
-	DeleteTag(ctx context.Context, tagRef resources.TagRef, precondition store.DeletePreconditions) (*ateapipb.Tag, error)
-	GetActorTemplate(ctx context.Context, templateRef resources.ActorTemplateRef) (*ateapipb.ActorTemplate, error)
-	DeleteActorTemplate(ctx context.Context, templateRef resources.ActorTemplateRef, precondition store.DeletePreconditions) (*ateapipb.ActorTemplate, error)
+	ListWorkerAssignments(ctx context.Context, workerName string, opts store.ListOptions) (store.ListResponse[*ateapi.ActorAssignment], error)
+	CreateTag(ctx context.Context, tag *ateapi.Tag) (*ateapi.Tag, error)
+	GetTag(ctx context.Context, tagRef resources.TagRef) (*ateapi.Tag, error)
+	UpdateTag(ctx context.Context, tagRef resources.TagRef, precondition store.Precondition, mutate func(toUpdate *ateapi.Tag) error) (*ateapi.Tag, error)
+	MarkTagForDeletion(ctx context.Context, tagRef resources.TagRef, precondition store.DeletePreconditions, mutate func(toUpdate *ateapi.Tag) error) (*ateapi.Tag, error)
+	DeleteTag(ctx context.Context, tagRef resources.TagRef, precondition store.DeletePreconditions) (*ateapi.Tag, error)
+	GetActorTemplate(ctx context.Context, templateRef resources.ActorTemplateRef) (*ateapi.ActorTemplate, error)
+	MarkActorTemplateForDeletion(ctx context.Context, templateRef resources.ActorTemplateRef, precondition store.DeletePreconditions, mutate func(toUpdate *ateapi.ActorTemplate) error) (*ateapi.ActorTemplate, error)
+	DeleteActorTemplate(ctx context.Context, templateRef resources.ActorTemplateRef, precondition store.DeletePreconditions) (*ateapi.ActorTemplate, error)
 	AcquireLease(ctx context.Context, key string) (*store.Lease, error)
 }
 
@@ -248,24 +253,38 @@ type actorWorkflowStore interface {
 // does from the other side: releasing the Actor bound to a Worker stays
 // in-process because there is no bind/release RPC.
 type WorkerWorkflow struct {
-	store workerWorkflowStore
+	store          workerWorkflowStore
+	dialer         *AteletDialer
+	reclaimTimeout time.Duration
+	now            func() time.Time
+
+	mu     sync.Mutex
+	gaveUp map[string]time.Time
 }
 
-// NewWorkerWorkflow creates a new WorkerWorkflow.
-func NewWorkerWorkflow(store workerWorkflowStore) *WorkerWorkflow {
-	return &WorkerWorkflow{store: store}
+// NewWorkerWorkflow creates a new WorkerWorkflow. dialer may be nil when the
+// caller only runs ReconcileAssignments.
+func NewWorkerWorkflow(store workerWorkflowStore, dialer *AteletDialer) *WorkerWorkflow {
+	return &WorkerWorkflow{
+		store:          store,
+		dialer:         dialer,
+		reclaimTimeout: defaultWorkerReclaimTimeout,
+		now:            time.Now,
+		gaveUp:         make(map[string]time.Time),
+	}
 }
 
 // workerWorkflowStore enumerates the exact storage methods needed by
 // WorkerWorkflow and nothing more.
 type workerWorkflowStore interface {
-	GetWorker(ctx context.Context, name string) (*ateapipb.Worker, error)
-	UpdateWorker(ctx context.Context, name string, precondition store.Precondition, mutate func(toUpdate *ateapipb.Worker) error) (*ateapipb.Worker, error)
-	DeleteWorker(ctx context.Context, name string, precondition store.DeletePreconditions) (*ateapipb.Worker, error)
-	ListWorkerAssignments(ctx context.Context, workerName string, opts store.ListOptions) (store.ListResponse[*ateapipb.ActorAssignment], error)
-	ReleaseActorFromWorker(ctx context.Context, workerName string, actorUID string) (*ateapipb.Worker, error)
-	GetActor(ctx context.Context, actorRef resources.ActorRef) (*ateapipb.Actor, error)
-	UpdateActor(ctx context.Context, actorRef resources.ActorRef, precondition store.Precondition, mutate func(toUpdate *ateapipb.Actor) error) (*ateapipb.Actor, error)
+	GetWorker(ctx context.Context, name string) (*ateapi.Worker, error)
+	UpdateWorker(ctx context.Context, name string, precondition store.Precondition, mutate func(toUpdate *ateapi.Worker) error) (*ateapi.Worker, error)
+	MarkWorkerForDeletion(ctx context.Context, name string, precondition store.DeletePreconditions, mutate func(toUpdate *ateapi.Worker) error) (*ateapi.Worker, error)
+	DeleteWorker(ctx context.Context, name string, precondition store.DeletePreconditions) (*ateapi.Worker, error)
+	ListWorkerAssignments(ctx context.Context, workerName string, opts store.ListOptions) (store.ListResponse[*ateapi.ActorAssignment], error)
+	ReleaseActorFromWorker(ctx context.Context, workerName string, actorUID string) (*ateapi.Worker, error)
+	GetActor(ctx context.Context, actorRef resources.ActorRef) (*ateapi.Actor, error)
+	UpdateActor(ctx context.Context, actorRef resources.ActorRef, precondition store.Precondition, mutate func(toUpdate *ateapi.Actor) error) (*ateapi.Actor, error)
 	AcquireLease(ctx context.Context, key string) (*store.Lease, error)
 }
 

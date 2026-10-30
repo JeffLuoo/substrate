@@ -25,10 +25,10 @@ import (
 	"time"
 
 	envoy_type "github.com/envoyproxy/go-control-plane/envoy/type/v3"
+	"go.ate.dev/substrate/api/ateapi/v1"
 	"go.ate.dev/substrate/cmd/atenet/internal/router/extproc"
 	"go.ate.dev/substrate/internal/ateattr"
 	"go.ate.dev/substrate/internal/resources"
-	"go.ate.dev/substrate/pkg/proto/ateapipb"
 	"go.opentelemetry.io/otel/trace"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -36,11 +36,11 @@ import (
 )
 
 type resumerMockClient struct {
-	ateapipb.ControlClient
-	resumeFn func(ctx context.Context, in *ateapipb.ResumeActorRequest, opts ...grpc.CallOption) (*ateapipb.ResumeActorResponse, error)
+	ateapi.ControlClient
+	resumeFn func(ctx context.Context, in *ateapi.ResumeActorRequest, opts ...grpc.CallOption) (*ateapi.ResumeActorResponse, error)
 }
 
-func (m *resumerMockClient) ResumeActor(ctx context.Context, in *ateapipb.ResumeActorRequest, opts ...grpc.CallOption) (*ateapipb.ResumeActorResponse, error) {
+func (m *resumerMockClient) ResumeActor(ctx context.Context, in *ateapi.ResumeActorRequest, opts ...grpc.CallOption) (*ateapi.ResumeActorResponse, error) {
 	if m.resumeFn != nil {
 		return m.resumeFn(ctx, in, opts...)
 	}
@@ -57,11 +57,11 @@ func TestActorResumer_ResumeActor(t *testing.T) {
 	t.Run("SuspendedResumedSuccessfully", func(t *testing.T) {
 		var resumeCalled int
 		mock := &resumerMockClient{
-			resumeFn: func(ctx context.Context, in *ateapipb.ResumeActorRequest, opts ...grpc.CallOption) (*ateapipb.ResumeActorResponse, error) {
+			resumeFn: func(ctx context.Context, in *ateapi.ResumeActorRequest, opts ...grpc.CallOption) (*ateapi.ResumeActorResponse, error) {
 				resumeCalled++
-				return &ateapipb.ResumeActorResponse{
-					Actor: &ateapipb.Actor{
-						Status: &ateapipb.ActorStatus{State: ateapipb.ActorState_ACTOR_STATE_RUNNING, WorkerAssignment: &ateapipb.WorkerAssignment{WorkerPodIps: []string{expectedIP}}},
+				return &ateapi.ResumeActorResponse{
+					Actor: &ateapi.Actor{
+						Status: &ateapi.ActorStatus{State: ateapi.ActorState_ACTOR_STATE_RUNNING, WorkerAssignment: &ateapi.WorkerAssignment{WorkerPodIps: []string{expectedIP}}},
 					},
 					Resumed: true,
 				}, nil
@@ -86,11 +86,11 @@ func TestActorResumer_ResumeActor(t *testing.T) {
 
 	t.Run("WarmRouting_Disambiguation", func(t *testing.T) {
 		mock := &resumerMockClient{
-			resumeFn: func(ctx context.Context, in *ateapipb.ResumeActorRequest, opts ...grpc.CallOption) (*ateapipb.ResumeActorResponse, error) {
-				return &ateapipb.ResumeActorResponse{
-					Actor: &ateapipb.Actor{
-						Metadata: &ateapipb.ResourceMetadata{Name: testActorName},
-						Status:   &ateapipb.ActorStatus{State: ateapipb.ActorState_ACTOR_STATE_RUNNING, WorkerAssignment: &ateapipb.WorkerAssignment{WorkerPodIps: []string{expectedIP}}},
+			resumeFn: func(ctx context.Context, in *ateapi.ResumeActorRequest, opts ...grpc.CallOption) (*ateapi.ResumeActorResponse, error) {
+				return &ateapi.ResumeActorResponse{
+					Actor: &ateapi.Actor{
+						Metadata: &ateapi.ResourceMetadata{Name: testActorName},
+						Status:   &ateapi.ActorStatus{State: ateapi.ActorState_ACTOR_STATE_RUNNING, WorkerAssignment: &ateapi.WorkerAssignment{WorkerPodIps: []string{expectedIP}}},
 					},
 					Resumed: false,
 				}, nil
@@ -110,14 +110,14 @@ func TestActorResumer_ResumeActor(t *testing.T) {
 	t.Run("RetryOnAbortedConflict", func(t *testing.T) {
 		var resumeCalled int
 		mock := &resumerMockClient{
-			resumeFn: func(ctx context.Context, in *ateapipb.ResumeActorRequest, opts ...grpc.CallOption) (*ateapipb.ResumeActorResponse, error) {
+			resumeFn: func(ctx context.Context, in *ateapi.ResumeActorRequest, opts ...grpc.CallOption) (*ateapi.ResumeActorResponse, error) {
 				resumeCalled++
 				if resumeCalled < 3 {
 					return nil, status.Error(codes.Aborted, "concurrent update conflict")
 				}
-				return &ateapipb.ResumeActorResponse{
-					Actor: &ateapipb.Actor{
-						Status: &ateapipb.ActorStatus{State: ateapipb.ActorState_ACTOR_STATE_RUNNING, WorkerAssignment: &ateapipb.WorkerAssignment{WorkerPodIps: []string{expectedIP}}},
+				return &ateapi.ResumeActorResponse{
+					Actor: &ateapi.Actor{
+						Status: &ateapi.ActorStatus{State: ateapi.ActorState_ACTOR_STATE_RUNNING, WorkerAssignment: &ateapi.WorkerAssignment{WorkerPodIps: []string{expectedIP}}},
 					},
 					Resumed: true,
 				}, nil
@@ -142,7 +142,7 @@ func TestActorResumer_ResumeActor(t *testing.T) {
 
 	t.Run("ActorNotFound", func(t *testing.T) {
 		mock := &resumerMockClient{
-			resumeFn: func(ctx context.Context, in *ateapipb.ResumeActorRequest, opts ...grpc.CallOption) (*ateapipb.ResumeActorResponse, error) {
+			resumeFn: func(ctx context.Context, in *ateapi.ResumeActorRequest, opts ...grpc.CallOption) (*ateapi.ResumeActorResponse, error) {
 				return nil, status.Error(codes.NotFound, "not found")
 			},
 		}
@@ -169,9 +169,9 @@ func TestActorResumer_ResumeActor(t *testing.T) {
 		defer close(gate)
 
 		mock := &resumerMockClient{
-			resumeFn: func(ctx context.Context, in *ateapipb.ResumeActorRequest, opts ...grpc.CallOption) (*ateapipb.ResumeActorResponse, error) {
+			resumeFn: func(ctx context.Context, in *ateapi.ResumeActorRequest, opts ...grpc.CallOption) (*ateapi.ResumeActorResponse, error) {
 				<-gate
-				return &ateapipb.ResumeActorResponse{Resumed: true}, nil
+				return &ateapi.ResumeActorResponse{Resumed: true}, nil
 			},
 		}
 
@@ -194,7 +194,7 @@ func TestActorResumer_ResumeActor(t *testing.T) {
 			gate := make(chan struct{})
 
 			mock := &resumerMockClient{
-				resumeFn: func(ctx context.Context, in *ateapipb.ResumeActorRequest, opts ...grpc.CallOption) (*ateapipb.ResumeActorResponse, error) {
+				resumeFn: func(ctx context.Context, in *ateapi.ResumeActorRequest, opts ...grpc.CallOption) (*ateapi.ResumeActorResponse, error) {
 					resumeCalled.Add(1)
 					<-gate
 					return nil, status.Error(codes.ResourceExhausted, "no worker has room for the actor")
@@ -242,14 +242,14 @@ func TestActorResumer_ResumeActor(t *testing.T) {
 		var mu sync.Mutex
 
 		mock := &resumerMockClient{
-			resumeFn: func(ctx context.Context, in *ateapipb.ResumeActorRequest, opts ...grpc.CallOption) (*ateapipb.ResumeActorResponse, error) {
+			resumeFn: func(ctx context.Context, in *ateapi.ResumeActorRequest, opts ...grpc.CallOption) (*ateapi.ResumeActorResponse, error) {
 				mu.Lock()
 				resumeCalled++
 				mu.Unlock()
 				time.Sleep(20 * time.Millisecond)
-				return &ateapipb.ResumeActorResponse{
-					Actor: &ateapipb.Actor{
-						Status: &ateapipb.ActorStatus{State: ateapipb.ActorState_ACTOR_STATE_RUNNING, WorkerAssignment: &ateapipb.WorkerAssignment{WorkerPodIps: []string{expectedIP}}},
+				return &ateapi.ResumeActorResponse{
+					Actor: &ateapi.Actor{
+						Status: &ateapi.ActorStatus{State: ateapi.ActorState_ACTOR_STATE_RUNNING, WorkerAssignment: &ateapi.WorkerAssignment{WorkerPodIps: []string{expectedIP}}},
 					},
 					Resumed: true,
 				}, nil
@@ -260,7 +260,7 @@ func TestActorResumer_ResumeActor(t *testing.T) {
 
 		var wg sync.WaitGroup
 		const concurrentRequests = 10
-		results := make([]*ateapipb.Actor, concurrentRequests)
+		results := make([]*ateapi.Actor, concurrentRequests)
 		outcomes := make([]ResumeOutcome, concurrentRequests)
 		errs := make([]error, concurrentRequests)
 
@@ -321,7 +321,7 @@ func TestActorResumer_Parking(t *testing.T) {
 			var mu sync.Mutex
 			var calls int
 			mock := &resumerMockClient{
-				resumeFn: func(ctx context.Context, in *ateapipb.ResumeActorRequest, opts ...grpc.CallOption) (*ateapipb.ResumeActorResponse, error) {
+				resumeFn: func(ctx context.Context, in *ateapi.ResumeActorRequest, opts ...grpc.CallOption) (*ateapi.ResumeActorResponse, error) {
 					mu.Lock()
 					calls++
 					n := calls
@@ -330,8 +330,8 @@ func TestActorResumer_Parking(t *testing.T) {
 						// Worker pool momentarily saturated.
 						return nil, status.Error(codes.FailedPrecondition, "no worker has room for the actor")
 					}
-					return &ateapipb.ResumeActorResponse{
-						Actor: &ateapipb.Actor{Metadata: &ateapipb.ResourceMetadata{Name: testActorName}, Status: &ateapipb.ActorStatus{State: ateapipb.ActorState_ACTOR_STATE_RUNNING, WorkerAssignment: &ateapipb.WorkerAssignment{WorkerPodIps: []string{expectedIP}}}},
+					return &ateapi.ResumeActorResponse{
+						Actor: &ateapi.Actor{Metadata: &ateapi.ResourceMetadata{Name: testActorName}, Status: &ateapi.ActorStatus{State: ateapi.ActorState_ACTOR_STATE_RUNNING, WorkerAssignment: &ateapi.WorkerAssignment{WorkerPodIps: []string{expectedIP}}}},
 					}, nil
 				},
 			}
@@ -357,7 +357,7 @@ func TestActorResumer_Parking(t *testing.T) {
 			var mu sync.Mutex
 			var calls int
 			mock := &resumerMockClient{
-				resumeFn: func(ctx context.Context, in *ateapipb.ResumeActorRequest, opts ...grpc.CallOption) (*ateapipb.ResumeActorResponse, error) {
+				resumeFn: func(ctx context.Context, in *ateapi.ResumeActorRequest, opts ...grpc.CallOption) (*ateapi.ResumeActorResponse, error) {
 					mu.Lock()
 					calls++
 					mu.Unlock()
@@ -392,7 +392,7 @@ func TestActorResumer_Parking(t *testing.T) {
 			var mu sync.Mutex
 			var calls int
 			mock := &resumerMockClient{
-				resumeFn: func(ctx context.Context, in *ateapipb.ResumeActorRequest, opts ...grpc.CallOption) (*ateapipb.ResumeActorResponse, error) {
+				resumeFn: func(ctx context.Context, in *ateapi.ResumeActorRequest, opts ...grpc.CallOption) (*ateapi.ResumeActorResponse, error) {
 					mu.Lock()
 					calls++
 					mu.Unlock()
@@ -426,7 +426,7 @@ func TestActorResumer_Parking(t *testing.T) {
 			var mu sync.Mutex
 			var calls int
 			mock := &resumerMockClient{
-				resumeFn: func(ctx context.Context, in *ateapipb.ResumeActorRequest, opts ...grpc.CallOption) (*ateapipb.ResumeActorResponse, error) {
+				resumeFn: func(ctx context.Context, in *ateapi.ResumeActorRequest, opts ...grpc.CallOption) (*ateapi.ResumeActorResponse, error) {
 					mu.Lock()
 					calls++
 					n := calls
@@ -435,8 +435,8 @@ func TestActorResumer_Parking(t *testing.T) {
 						// Control plane momentarily unreachable (e.g. rolling restart).
 						return nil, status.Error(codes.Unavailable, "connection refused")
 					}
-					return &ateapipb.ResumeActorResponse{
-						Actor: &ateapipb.Actor{Metadata: &ateapipb.ResourceMetadata{Name: testActorName}, Status: &ateapipb.ActorStatus{State: ateapipb.ActorState_ACTOR_STATE_RUNNING, WorkerAssignment: &ateapipb.WorkerAssignment{WorkerPodIps: []string{expectedIP}}}},
+					return &ateapi.ResumeActorResponse{
+						Actor: &ateapi.Actor{Metadata: &ateapi.ResourceMetadata{Name: testActorName}, Status: &ateapi.ActorStatus{State: ateapi.ActorState_ACTOR_STATE_RUNNING, WorkerAssignment: &ateapi.WorkerAssignment{WorkerPodIps: []string{expectedIP}}}},
 					}, nil
 				},
 			}
@@ -462,7 +462,7 @@ func TestActorResumer_Parking(t *testing.T) {
 			var mu sync.Mutex
 			var calls int
 			mock := &resumerMockClient{
-				resumeFn: func(ctx context.Context, in *ateapipb.ResumeActorRequest, opts ...grpc.CallOption) (*ateapipb.ResumeActorResponse, error) {
+				resumeFn: func(ctx context.Context, in *ateapi.ResumeActorRequest, opts ...grpc.CallOption) (*ateapi.ResumeActorResponse, error) {
 					mu.Lock()
 					calls++
 					mu.Unlock()
@@ -497,7 +497,7 @@ func TestActorResumer_Parking(t *testing.T) {
 			var ctxErrAtReturn error
 			base := time.Now()
 			mock := &resumerMockClient{
-				resumeFn: func(ctx context.Context, in *ateapipb.ResumeActorRequest, opts ...grpc.CallOption) (*ateapipb.ResumeActorResponse, error) {
+				resumeFn: func(ctx context.Context, in *ateapi.ResumeActorRequest, opts ...grpc.CallOption) (*ateapi.ResumeActorResponse, error) {
 					mu.Lock()
 					calls++
 					n := calls
@@ -512,8 +512,8 @@ func TestActorResumer_Parking(t *testing.T) {
 					mu.Lock()
 					ctxErrAtReturn = ctx.Err()
 					mu.Unlock()
-					return &ateapipb.ResumeActorResponse{
-						Actor:   &ateapipb.Actor{Metadata: &ateapipb.ResourceMetadata{Name: testActorName}, Status: &ateapipb.ActorStatus{State: ateapipb.ActorState_ACTOR_STATE_RUNNING, WorkerAssignment: &ateapipb.WorkerAssignment{WorkerPodIps: []string{expectedIP}}}},
+					return &ateapi.ResumeActorResponse{
+						Actor:   &ateapi.Actor{Metadata: &ateapi.ResourceMetadata{Name: testActorName}, Status: &ateapi.ActorStatus{State: ateapi.ActorState_ACTOR_STATE_RUNNING, WorkerAssignment: &ateapi.WorkerAssignment{WorkerPodIps: []string{expectedIP}}}},
 						Resumed: true,
 					}, nil
 				},
@@ -554,7 +554,7 @@ func TestActorResumer_Parking(t *testing.T) {
 					const budget = 300 * time.Millisecond
 					var calls atomic.Int32
 					mock := &resumerMockClient{
-						resumeFn: func(context.Context, *ateapipb.ResumeActorRequest, ...grpc.CallOption) (*ateapipb.ResumeActorResponse, error) {
+						resumeFn: func(context.Context, *ateapi.ResumeActorRequest, ...grpc.CallOption) (*ateapi.ResumeActorResponse, error) {
 							if calls.Add(1) == 1 {
 								return nil, status.Error(codes.ResourceExhausted, "no free workers available")
 							}
@@ -589,7 +589,7 @@ func TestActorResumer_Parking(t *testing.T) {
 			var mu sync.Mutex
 			var calls int
 			mock := &resumerMockClient{
-				resumeFn: func(ctx context.Context, in *ateapipb.ResumeActorRequest, opts ...grpc.CallOption) (*ateapipb.ResumeActorResponse, error) {
+				resumeFn: func(ctx context.Context, in *ateapi.ResumeActorRequest, opts ...grpc.CallOption) (*ateapi.ResumeActorResponse, error) {
 					mu.Lock()
 					calls++
 					mu.Unlock()
@@ -620,7 +620,7 @@ func TestActorResumer_Parking(t *testing.T) {
 			var mu sync.Mutex
 			var calls int
 			mock := &resumerMockClient{
-				resumeFn: func(ctx context.Context, in *ateapipb.ResumeActorRequest, opts ...grpc.CallOption) (*ateapipb.ResumeActorResponse, error) {
+				resumeFn: func(ctx context.Context, in *ateapi.ResumeActorRequest, opts ...grpc.CallOption) (*ateapi.ResumeActorResponse, error) {
 					mu.Lock()
 					calls++
 					mu.Unlock()
@@ -665,7 +665,7 @@ func testCallerCancelDoesNotAbortFlight(t *testing.T) {
 	started := make(chan struct{})
 	proceed := make(chan struct{})
 	mock := &resumerMockClient{
-		resumeFn: func(ctx context.Context, in *ateapipb.ResumeActorRequest, opts ...grpc.CallOption) (*ateapipb.ResumeActorResponse, error) {
+		resumeFn: func(ctx context.Context, in *ateapi.ResumeActorRequest, opts ...grpc.CallOption) (*ateapi.ResumeActorResponse, error) {
 			mu.Lock()
 			calls++
 			n := calls
@@ -675,8 +675,8 @@ func testCallerCancelDoesNotAbortFlight(t *testing.T) {
 			}
 			// Hold the flight open until the test releases it.
 			<-proceed
-			return &ateapipb.ResumeActorResponse{
-				Actor: &ateapipb.Actor{Metadata: &ateapipb.ResourceMetadata{Name: testActorName}, Status: &ateapipb.ActorStatus{State: ateapipb.ActorState_ACTOR_STATE_RUNNING, WorkerAssignment: &ateapipb.WorkerAssignment{WorkerPodIps: []string{expectedIP}}}},
+			return &ateapi.ResumeActorResponse{
+				Actor: &ateapi.Actor{Metadata: &ateapi.ResourceMetadata{Name: testActorName}, Status: &ateapi.ActorStatus{State: ateapi.ActorState_ACTOR_STATE_RUNNING, WorkerAssignment: &ateapi.WorkerAssignment{WorkerPodIps: []string{expectedIP}}}},
 			}, nil
 		},
 	}
@@ -704,7 +704,7 @@ func testCallerCancelDoesNotAbortFlight(t *testing.T) {
 	// Caller 2 arrives after caller 1 left; the flight is still in its first
 	// RPC, so it must join that flight rather than start a new one.
 	type result struct {
-		actor *ateapipb.Actor
+		actor *ateapi.Actor
 		err   error
 	}
 	resCh := make(chan result, 1)
@@ -744,13 +744,13 @@ func TestActorResumer_LotAdmission(t *testing.T) {
 		expectedIP    = "10.0.0.99"
 	)
 	testActorRef := resources.ActorRef{Atespace: testAtespace, Name: testActorName}
-	runningResp := func() *ateapipb.ResumeActorResponse {
-		return &ateapipb.ResumeActorResponse{
-			Actor: &ateapipb.Actor{
-				Metadata: &ateapipb.ResourceMetadata{Name: testActorName},
-				Status: &ateapipb.ActorStatus{
-					State:            ateapipb.ActorState_ACTOR_STATE_RUNNING,
-					WorkerAssignment: &ateapipb.WorkerAssignment{WorkerPodIps: []string{expectedIP}},
+	runningResp := func() *ateapi.ResumeActorResponse {
+		return &ateapi.ResumeActorResponse{
+			Actor: &ateapi.Actor{
+				Metadata: &ateapi.ResourceMetadata{Name: testActorName},
+				Status: &ateapi.ActorStatus{
+					State:            ateapi.ActorState_ACTOR_STATE_RUNNING,
+					WorkerAssignment: &ateapi.WorkerAssignment{WorkerPodIps: []string{expectedIP}},
 				},
 			},
 			Resumed: true,
@@ -762,9 +762,9 @@ func TestActorResumer_LotAdmission(t *testing.T) {
 			mock := &resumerMockClient{
 				resumeFn: func(
 					ctx context.Context,
-					in *ateapipb.ResumeActorRequest,
+					in *ateapi.ResumeActorRequest,
 					opts ...grpc.CallOption,
-				) (*ateapipb.ResumeActorResponse, error) {
+				) (*ateapi.ResumeActorResponse, error) {
 					return runningResp(), nil
 				},
 			}
@@ -801,9 +801,9 @@ func TestActorResumer_LotAdmission(t *testing.T) {
 			mock := &resumerMockClient{
 				resumeFn: func(
 					ctx context.Context,
-					in *ateapipb.ResumeActorRequest,
+					in *ateapi.ResumeActorRequest,
 					opts ...grpc.CallOption,
-				) (*ateapipb.ResumeActorResponse, error) {
+				) (*ateapi.ResumeActorResponse, error) {
 					mu.Lock()
 					calls++
 					n := calls
@@ -855,9 +855,9 @@ func TestActorResumer_LotAdmission(t *testing.T) {
 			mock := &resumerMockClient{
 				resumeFn: func(
 					ctx context.Context,
-					in *ateapipb.ResumeActorRequest,
+					in *ateapi.ResumeActorRequest,
 					opts ...grpc.CallOption,
-				) (*ateapipb.ResumeActorResponse, error) {
+				) (*ateapi.ResumeActorResponse, error) {
 					mu.Lock()
 					calls++
 					mu.Unlock()
@@ -898,9 +898,9 @@ func TestActorResumer_LotAdmission(t *testing.T) {
 			mock := &resumerMockClient{
 				resumeFn: func(
 					ctx context.Context,
-					in *ateapipb.ResumeActorRequest,
+					in *ateapi.ResumeActorRequest,
 					opts ...grpc.CallOption,
-				) (*ateapipb.ResumeActorResponse, error) {
+				) (*ateapi.ResumeActorResponse, error) {
 					mu.Lock()
 					calls++
 					n := calls
@@ -916,7 +916,7 @@ func TestActorResumer_LotAdmission(t *testing.T) {
 
 			// The leader parks and takes the lot's only slot.
 			type result struct {
-				actor   *ateapipb.Actor
+				actor   *ateapi.Actor
 				outcome ResumeOutcome
 				err     error
 			}
@@ -964,9 +964,9 @@ func TestActorResumer_LotAdmission(t *testing.T) {
 			mock := &resumerMockClient{
 				resumeFn: func(
 					ctx context.Context,
-					in *ateapipb.ResumeActorRequest,
+					in *ateapi.ResumeActorRequest,
 					opts ...grpc.CallOption,
-				) (*ateapipb.ResumeActorResponse, error) {
+				) (*ateapi.ResumeActorResponse, error) {
 					return nil, status.Error(codes.ResourceExhausted, "no worker has room for the actor")
 				},
 			}
@@ -996,9 +996,9 @@ func TestActorResumer_LotAdmission(t *testing.T) {
 			mock := &resumerMockClient{
 				resumeFn: func(
 					ctx context.Context,
-					in *ateapipb.ResumeActorRequest,
+					in *ateapi.ResumeActorRequest,
 					opts ...grpc.CallOption,
-				) (*ateapipb.ResumeActorResponse, error) {
+				) (*ateapi.ResumeActorResponse, error) {
 					mu.Lock()
 					calls++
 					n := calls
@@ -1045,9 +1045,9 @@ func TestActorResumer_LotAdmission(t *testing.T) {
 		mock := &resumerMockClient{
 			resumeFn: func(
 				ctx context.Context,
-				in *ateapipb.ResumeActorRequest,
+				in *ateapi.ResumeActorRequest,
 				opts ...grpc.CallOption,
-			) (*ateapipb.ResumeActorResponse, error) {
+			) (*ateapi.ResumeActorResponse, error) {
 				mu.Lock()
 				calls++
 				mu.Unlock()
@@ -1101,10 +1101,10 @@ func TestActorResumer_FlightKeepsCallerTraceContext(t *testing.T) {
 
 	var got trace.SpanContext
 	mock := &resumerMockClient{
-		resumeFn: func(ctx context.Context, in *ateapipb.ResumeActorRequest, opts ...grpc.CallOption) (*ateapipb.ResumeActorResponse, error) {
+		resumeFn: func(ctx context.Context, in *ateapi.ResumeActorRequest, opts ...grpc.CallOption) (*ateapi.ResumeActorResponse, error) {
 			got = trace.SpanContextFromContext(ctx)
-			return &ateapipb.ResumeActorResponse{
-				Actor: &ateapipb.Actor{Status: &ateapipb.ActorStatus{State: ateapipb.ActorState_ACTOR_STATE_RUNNING, WorkerAssignment: &ateapipb.WorkerAssignment{WorkerPodIps: []string{"10.0.0.1"}}}},
+			return &ateapi.ResumeActorResponse{
+				Actor: &ateapi.Actor{Status: &ateapi.ActorStatus{State: ateapi.ActorState_ACTOR_STATE_RUNNING, WorkerAssignment: &ateapi.WorkerAssignment{WorkerPodIps: []string{"10.0.0.1"}}}},
 			}, nil
 		},
 	}

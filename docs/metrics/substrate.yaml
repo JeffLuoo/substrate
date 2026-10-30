@@ -243,11 +243,12 @@ blind_spots:
       flag, and a 1% sample of the rest. The runtime keys
       access_log.min_status and access_log.sample on the admin port restore
       full logging while you debug.
-  - area: GCP Secret Manager credential provider
-    code: internal/plugins/gcp-secret-manager
+  - area: ate-idp-server
+    code: cmd/ate-idp-server
     brief: >
-      This plugin has no metrics. It does not install the otelgrpc server
-      handler. Thus rpc.server.call.duration has no credprovider series for it.
+      This component has no metrics. A relying party that cannot fetch the
+      discovery document or key set sees only failed token verification; check
+      the server's "Cannot publish the actor JWT keys" logs.
   - area: golden snapshot pipeline
     code: cmd/ateapi/internal/controlapi/template_reconciler.go
     brief: The template reconciler in ate-api has no instruments. Thus nothing measures a build of a golden image.

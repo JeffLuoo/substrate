@@ -24,13 +24,14 @@ import (
 	"path/filepath"
 	"time"
 
+	atev1 "go.ate.dev/substrate/api/infra/k8s/ate/v1"
 	"go.ate.dev/substrate/cmd/ateworker-gvisor/internal/cgroupstats"
 	"go.ate.dev/substrate/internal/apierror"
 	"go.ate.dev/substrate/internal/ateattr"
+	"go.ate.dev/substrate/internal/ateworkervalidation"
 	"go.ate.dev/substrate/internal/ocispec"
 	"go.ate.dev/substrate/internal/proto/ateworkerpb"
 	"go.ate.dev/substrate/internal/resources"
-	atev1alpha1 "go.ate.dev/substrate/pkg/api/v1alpha1"
 )
 
 // defaultCgroupRoot is the worker pod's own cgroup scope. The worker runs in a
@@ -43,10 +44,10 @@ const defaultCgroupRoot = "/sys/fs/cgroup"
 // sandbox as a whole.
 //
 // gVisor runs every container of a sandbox as threads inside one host process,
-// the sentry. runsc starts that process from the root container's create and
-// from inside that container's cgroup — container.createRoot wraps the sandbox
-// and gofer spawn in cgroup.RunInCgroup — so the sentry lands in the leaf of
-// the pause container, the first one RunWorkload and RestoreWorkload create.
+// the sentry. runsc starts that process from the sandbox's create, inside the
+// sandbox's cgroup (container.createRoot wraps the sandbox spawn in
+// cgroup.RunInCgroup), so the sentry lands in the sandbox's leaf. RunWorkload
+// and RestoreWorkload create the sandbox first.
 //
 // The leaf is a direct child of the delegated scope rather than of ateworker's own
 // cgroup, because runsc resolves cgroupsPath against the parent of the cgroup
@@ -71,11 +72,9 @@ const defaultCgroupRoot = "/sys/fs/cgroup"
 //
 // What the leaf holds besides the actor's own work: the sentry's own overhead
 // (its Go heap, page tables, netstack) and the gofers. Process listings taken
-// on a live node in #161 put runsc-sandbox and both gofers — the pause
-// container's and the actor container's — in the pause cgroup. Those runs
-// predate #496, so they establish the leaf name and the fact that everything
-// lands in one leaf, not the absolute path, which #496's delegation moved under
-// the pod scope.
+// on a live node in #161 put runsc-sandbox and the gofers in the sandbox's
+// cgroup leaf. Those runs predate #496 and the rename to _sandbox, so they
+// establish only that everything lands in one leaf.
 //
 // So this measures the sandbox, not the actor's processes in isolation, which
 // is what the proto means by "the unit of measurement is the SANDBOX". Sizing
@@ -86,7 +85,7 @@ const defaultCgroupRoot = "/sys/fs/cgroup"
 // accounting, which the proto already says is not reported here.
 //
 // ocispec.GVisorCgroupLeaf supplies the leaf name for both shaping and stats.
-const sandboxCgroupContainer = ocispec.PauseContainer
+const sandboxCgroupContainer = ocispec.SandboxID
 
 // GetWorkloadStats implements ateworkerpb.Worker/GetWorkloadStats.
 //
@@ -94,8 +93,8 @@ const sandboxCgroupContainer = ocispec.PauseContainer
 // boots and checkpoints: polls would stall behind runsc, and a checkpoint
 // would wait on telemetry. The cgroup files are read with no lock held.
 func (s *AteWorkerService) GetWorkloadStats(ctx context.Context, req *ateworkerpb.GetWorkloadStatsRequest) (*ateworkerpb.GetWorkloadStatsResponse, error) {
-	if req.GetActorUid() == "" {
-		return nil, apierror.InvalidArgument("actor_uid is required")
+	if err := ateworkervalidation.ValidateGetWorkloadStatsRequest(ctx, req); err != nil {
+		return nil, err
 	}
 
 	// NOT_FOUND rather than FAILED_PRECONDITION: the requested actor is not
@@ -240,7 +239,7 @@ func pendingSample(active *resources.ActorAttribution) *ateworkerpb.WorkloadStat
 		ActorTemplateAtespace: active.TemplateAtespace,
 		ActorTemplateName:     active.TemplateName,
 
-		SandboxClass: string(atev1alpha1.SandboxClassGvisor),
+		SandboxClass: string(atev1.SandboxClassGvisor),
 
 		ObservedAtUnixNano: time.Now().UnixNano(),
 	}
@@ -283,7 +282,7 @@ func (s *AteWorkerService) sampleSandbox(active *resources.ActorAttribution) (*a
 		ActorTemplateAtespace: active.TemplateAtespace,
 		ActorTemplateName:     active.TemplateName,
 
-		SandboxClass: string(atev1alpha1.SandboxClassGvisor),
+		SandboxClass: string(atev1.SandboxClassGvisor),
 		Source:       ateworkerpb.StatsSource_STATS_SOURCE_CGROUP,
 
 		MemoryCurrentBytes:    sample.MemoryCurrentBytes,
@@ -303,9 +302,6 @@ func (s *AteWorkerService) sampleSandbox(active *resources.ActorAttribution) (*a
 // and holds the actor's lock while it does, so a busy actor is skipped. The
 // cgroup was read before the lock was checked, and h is looked up again after,
 // so a teardown that starts or finishes in between is never reported.
-//
-// oom_kill counts over the cgroup's lifetime. A leaf left behind by an earlier
-// activation of the same actor carries its count forward.
 func (s *AteWorkerService) warnDeadSandbox(ctx context.Context, h *hostedActor, raw cgroupstats.Sample) {
 	if h.deadReported.Load() {
 		return

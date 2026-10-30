@@ -19,19 +19,19 @@ import (
 	"maps"
 	"testing"
 
+	"go.ate.dev/substrate/api/ateapi/v1"
 	"go.ate.dev/substrate/internal/resources"
-	"go.ate.dev/substrate/pkg/proto/ateapipb"
 	"google.golang.org/genproto/googleapis/rpc/errdetails"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/proto"
 )
 
-func createActorWithLabels(t *testing.T, tc *testContext, name string, labels map[string]string) *ateapipb.Actor {
+func createActorWithLabels(t *testing.T, tc *testContext, name string, labels map[string]string) *ateapi.Actor {
 	t.Helper()
-	actor, err := tc.client.CreateActor(context.Background(), &ateapipb.CreateActorRequest{Actor: &ateapipb.Actor{
-		Metadata:      &ateapipb.ResourceMetadata{Atespace: testAtespace, Name: name},
-		ActorTemplate: &ateapipb.ObjectRef{Atespace: testAtespace, Name: "tmpl1"},
+	actor, err := tc.client.CreateActor(context.Background(), &ateapi.CreateActorRequest{Actor: &ateapi.Actor{
+		Metadata:      &ateapi.ResourceMetadata{Atespace: testAtespace, Name: name},
+		ActorTemplate: &ateapi.ObjectRef{Atespace: testAtespace, Name: "tmpl1"},
 		Labels:        labels,
 	}})
 	if err != nil {
@@ -64,14 +64,14 @@ func TestSetActorLabels(t *testing.T) {
 	defer tc.cleanup()
 	createTemplate(t, tc, ns)
 	ctx := context.Background()
-	ref := &ateapipb.ObjectRef{Atespace: testAtespace, Name: "id1"}
+	ref := &ateapi.ObjectRef{Atespace: testAtespace, Name: "id1"}
 
 	created := createActorWithLabels(t, tc, "id1", map[string]string{"team": "a"})
 	if got := created.GetLabels(); !maps.Equal(got, map[string]string{"team": "a"}) {
 		t.Fatalf("CreateActor labels = %v", got)
 	}
 
-	set, err := tc.client.SetActorLabels(ctx, &ateapipb.SetActorLabelsRequest{
+	set, err := tc.client.SetActorLabels(ctx, &ateapi.SetActorLabelsRequest{
 		Actor:      ref,
 		Labels:     map[string]string{"agent-cost/budget-group": "test-atespace.root"},
 		DeleteKeys: []string{"team", "absent"},
@@ -85,7 +85,7 @@ func TestSetActorLabels(t *testing.T) {
 	}
 
 	// Idempotent: the same request writes nothing.
-	again, err := tc.client.SetActorLabels(ctx, &ateapipb.SetActorLabelsRequest{Actor: ref, Labels: want})
+	again, err := tc.client.SetActorLabels(ctx, &ateapi.SetActorLabelsRequest{Actor: ref, Labels: want})
 	if err != nil {
 		t.Fatalf("SetActorLabels (repeat) failed: %v", err)
 	}
@@ -93,14 +93,14 @@ func TestSetActorLabels(t *testing.T) {
 		t.Errorf("repeat SetActorLabels bumped the version %d -> %d", set.GetMetadata().GetVersion(), again.GetMetadata().GetVersion())
 	}
 
-	got, err := tc.client.GetActor(ctx, &ateapipb.GetActorRequest{Actor: ref})
+	got, err := tc.client.GetActor(ctx, &ateapi.GetActorRequest{Actor: ref})
 	if err != nil {
 		t.Fatalf("GetActor failed: %v", err)
 	}
 	if !maps.Equal(got.GetLabels(), want) {
 		t.Errorf("GetActor labels = %v, want %v", got.GetLabels(), want)
 	}
-	list, err := tc.client.ListActors(ctx, &ateapipb.ListActorsRequest{Atespace: testAtespace})
+	list, err := tc.client.ListActors(ctx, &ateapi.ListActorsRequest{Atespace: testAtespace})
 	if err != nil {
 		t.Fatalf("ListActors failed: %v", err)
 	}
@@ -111,7 +111,7 @@ func TestSetActorLabels(t *testing.T) {
 	// UpdateActor is a whole-object replace, but keeps the stored labels.
 	update := proto.CloneOf(got)
 	update.Labels = nil
-	updated, err := tc.client.UpdateActor(ctx, &ateapipb.UpdateActorRequest{Actor: update})
+	updated, err := tc.client.UpdateActor(ctx, &ateapi.UpdateActorRequest{Actor: update})
 	if err != nil {
 		t.Fatalf("UpdateActor failed: %v", err)
 	}
@@ -119,7 +119,7 @@ func TestSetActorLabels(t *testing.T) {
 		t.Errorf("UpdateActor labels = %v, want %v", updated.GetLabels(), want)
 	}
 
-	_, err = tc.client.SetActorLabels(ctx, &ateapipb.SetActorLabelsRequest{Actor: ref, Labels: map[string]string{"bad key!": "v"}})
+	_, err = tc.client.SetActorLabels(ctx, &ateapi.SetActorLabelsRequest{Actor: ref, Labels: map[string]string{"bad key!": "v"}})
 	if status.Code(err) != codes.InvalidArgument {
 		t.Errorf("SetActorLabels with an invalid key: got %v, want InvalidArgument", err)
 	}
@@ -132,19 +132,19 @@ func TestAddActorHold_SuspendsRunningActorAndBlocksResume(t *testing.T) {
 	createTemplate(t, tc, ns)
 	createWorkerPod(t, tc, ns, "worker-1", "node1", "pool1")
 	ctx := context.Background()
-	ref := &ateapipb.ObjectRef{Atespace: testAtespace, Name: "id1"}
+	ref := &ateapi.ObjectRef{Atespace: testAtespace, Name: "id1"}
 
 	createActorWithLabels(t, tc, "id1", nil)
-	if _, err := tc.client.ResumeActor(ctx, &ateapipb.ResumeActorRequest{Actor: ref}); err != nil {
+	if _, err := tc.client.ResumeActor(ctx, &ateapi.ResumeActorRequest{Actor: ref}); err != nil {
 		t.Fatalf("ResumeActor failed: %v", err)
 	}
 
-	hold := &ateapipb.ActorHold{Name: "agent-cost/budget", Reason: "budget exhausted"}
-	held, err := tc.client.AddActorHold(ctx, &ateapipb.AddActorHoldRequest{Actor: ref, Hold: hold})
+	hold := &ateapi.ActorHold{Name: "agent-cost/budget", Reason: "budget exhausted"}
+	held, err := tc.client.AddActorHold(ctx, &ateapi.AddActorHoldRequest{Actor: ref, Hold: hold})
 	if err != nil {
 		t.Fatalf("AddActorHold failed: %v", err)
 	}
-	if state := held.GetStatus().GetState(); state != ateapipb.ActorState_ACTOR_STATE_SUSPENDED {
+	if state := held.GetStatus().GetState(); state != ateapi.ActorState_ACTOR_STATE_SUSPENDED {
 		t.Fatalf("AddActorHold left the actor %s, want SUSPENDED", state)
 	}
 	holds := held.GetStatus().GetHolds()
@@ -153,7 +153,7 @@ func TestAddActorHold_SuspendsRunningActorAndBlocksResume(t *testing.T) {
 	}
 
 	// Idempotent: a repeat keeps the first created_at.
-	again, err := tc.client.AddActorHold(ctx, &ateapipb.AddActorHoldRequest{Actor: ref, Hold: hold})
+	again, err := tc.client.AddActorHold(ctx, &ateapi.AddActorHoldRequest{Actor: ref, Hold: hold})
 	if err != nil {
 		t.Fatalf("AddActorHold (repeat) failed: %v", err)
 	}
@@ -161,7 +161,7 @@ func TestAddActorHold_SuspendsRunningActorAndBlocksResume(t *testing.T) {
 		t.Errorf("repeat AddActorHold holds = %v, want %v", got, holds)
 	}
 
-	_, err = tc.client.ResumeActor(ctx, &ateapipb.ResumeActorRequest{Actor: ref})
+	_, err = tc.client.ResumeActor(ctx, &ateapi.ResumeActorRequest{Actor: ref})
 	assertActorHeld(t, err, "agent-cost/budget")
 
 	// The hold is persisted, not cached.
@@ -173,18 +173,18 @@ func TestAddActorHold_SuspendsRunningActorAndBlocksResume(t *testing.T) {
 		t.Errorf("stored holds = %v, want one", got.GetStatus().GetHolds())
 	}
 
-	removed, err := tc.client.RemoveActorHold(ctx, &ateapipb.RemoveActorHoldRequest{Actor: ref, HoldName: "agent-cost/budget"})
+	removed, err := tc.client.RemoveActorHold(ctx, &ateapi.RemoveActorHoldRequest{Actor: ref, HoldName: "agent-cost/budget"})
 	if err != nil {
 		t.Fatalf("RemoveActorHold failed: %v", err)
 	}
-	if len(removed.GetStatus().GetHolds()) != 0 || removed.GetStatus().GetState() != ateapipb.ActorState_ACTOR_STATE_SUSPENDED {
+	if len(removed.GetStatus().GetHolds()) != 0 || removed.GetStatus().GetState() != ateapi.ActorState_ACTOR_STATE_SUSPENDED {
 		t.Errorf("after RemoveActorHold: holds %v state %s, want none and SUSPENDED", removed.GetStatus().GetHolds(), removed.GetStatus().GetState())
 	}
-	if _, err := tc.client.RemoveActorHold(ctx, &ateapipb.RemoveActorHoldRequest{Actor: ref, HoldName: "agent-cost/budget"}); err != nil {
+	if _, err := tc.client.RemoveActorHold(ctx, &ateapi.RemoveActorHoldRequest{Actor: ref, HoldName: "agent-cost/budget"}); err != nil {
 		t.Errorf("RemoveActorHold of an absent hold: %v, want no-op", err)
 	}
 
-	resumed, err := tc.client.ResumeActor(ctx, &ateapipb.ResumeActorRequest{Actor: ref})
+	resumed, err := tc.client.ResumeActor(ctx, &ateapi.ResumeActorRequest{Actor: ref})
 	if err != nil {
 		t.Fatalf("ResumeActor after removing the hold failed: %v", err)
 	}
@@ -200,20 +200,20 @@ func TestAddActorHold_SuspendedActor(t *testing.T) {
 	createTemplate(t, tc, ns)
 	createWorkerPod(t, tc, ns, "worker-1", "node1", "pool1")
 	ctx := context.Background()
-	ref := &ateapipb.ObjectRef{Atespace: testAtespace, Name: "id1"}
+	ref := &ateapi.ObjectRef{Atespace: testAtespace, Name: "id1"}
 	createActorWithLabels(t, tc, "id1", nil)
 
-	if _, err := tc.client.AddActorHold(ctx, &ateapipb.AddActorHoldRequest{Actor: ref, Hold: &ateapipb.ActorHold{Name: "ax/loop"}}); err != nil {
+	if _, err := tc.client.AddActorHold(ctx, &ateapi.AddActorHoldRequest{Actor: ref, Hold: &ateapi.ActorHold{Name: "ax/loop"}}); err != nil {
 		t.Fatalf("AddActorHold failed: %v", err)
 	}
-	_, err := tc.client.ResumeActor(ctx, &ateapipb.ResumeActorRequest{Actor: ref})
+	_, err := tc.client.ResumeActor(ctx, &ateapi.ResumeActorRequest{Actor: ref})
 	assertActorHeld(t, err, "ax/loop")
 
-	got, err := tc.client.GetActor(ctx, &ateapipb.GetActorRequest{Actor: ref})
+	got, err := tc.client.GetActor(ctx, &ateapi.GetActorRequest{Actor: ref})
 	if err != nil {
 		t.Fatalf("GetActor failed: %v", err)
 	}
-	if got.GetStatus().GetState() != ateapipb.ActorState_ACTOR_STATE_SUSPENDED || got.GetStatus().GetWorkerAssignment() != nil {
+	if got.GetStatus().GetState() != ateapi.ActorState_ACTOR_STATE_SUSPENDED || got.GetStatus().GetWorkerAssignment() != nil {
 		t.Errorf("held actor: state %s, assignment %v; want SUSPENDED with no worker", got.GetStatus().GetState(), got.GetStatus().GetWorkerAssignment())
 	}
 }
@@ -224,18 +224,18 @@ func TestAddActorHold_Validation(t *testing.T) {
 	defer tc.cleanup()
 	createTemplate(t, tc, ns)
 	ctx := context.Background()
-	ref := &ateapipb.ObjectRef{Atespace: testAtespace, Name: "id1"}
+	ref := &ateapi.ObjectRef{Atespace: testAtespace, Name: "id1"}
 	createActorWithLabels(t, tc, "id1", nil)
 
 	for _, name := range []string{"", "budget", "/budget", "Not Valid/x"} {
-		_, err := tc.client.AddActorHold(ctx, &ateapipb.AddActorHoldRequest{Actor: ref, Hold: &ateapipb.ActorHold{Name: name}})
+		_, err := tc.client.AddActorHold(ctx, &ateapi.AddActorHoldRequest{Actor: ref, Hold: &ateapi.ActorHold{Name: name}})
 		if status.Code(err) != codes.InvalidArgument {
 			t.Errorf("AddActorHold(%q): got %v, want InvalidArgument", name, err)
 		}
 	}
-	_, err := tc.client.AddActorHold(ctx, &ateapipb.AddActorHoldRequest{
-		Actor: &ateapipb.ObjectRef{Atespace: testAtespace, Name: "missing"},
-		Hold:  &ateapipb.ActorHold{Name: "agent-cost/budget"},
+	_, err := tc.client.AddActorHold(ctx, &ateapi.AddActorHoldRequest{
+		Actor: &ateapi.ObjectRef{Atespace: testAtespace, Name: "missing"},
+		Hold:  &ateapi.ActorHold{Name: "agent-cost/budget"},
 	})
 	if status.Code(err) != codes.NotFound {
 		t.Errorf("AddActorHold on a missing actor: got %v, want NotFound", err)

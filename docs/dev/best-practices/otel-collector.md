@@ -6,7 +6,7 @@ it.
 
 For how to *instrument* a Substrate service, see
 [Tracing Best Practices](tracing.md). For what Substrate emits and where it
-shows up, see [Actor Observability](../../observability.md).
+shows up, see [Actor Observability](../../guides/observability.md).
 
 ## What Is Available
 
@@ -14,7 +14,7 @@ shows up, see [Actor Observability](../../observability.md).
 |---|---|---|
 | [GKE Managed OpenTelemetry](#gke-managed-opentelemetry-gke-only) | Deployment behind a ClusterIP Service | GKE |
 | [Self-managed DaemonSet](#self-managed-daemonset) | One collector per node | You |
-| [kind](#local-development-kind) | Single-replica Deployment plus Jaeger | Bundled with `install-ate-kind.sh` |
+| [kind](#local-development-kind) | Single-replica Deployment plus Jaeger | Bundled with `ate-setup --kind` |
 
 This guide does not recommend one over another — that depends on your cluster,
 your telemetry volume, and who is on call for the collector. It documents what
@@ -426,6 +426,9 @@ that defaults to it, so you should not normally need either:
 `ate-controller`'s `--otel-exporter-otlp-endpoint`, which it also propagates to
 the worker pods it creates, and `atenet-router`'s
 `--otlp-collector-address`, which is what its Envoy is given over xDS.
+`ateworker` uses the propagated endpoint only when its node's `atelet` serves no
+OTLP relay. It exports through the relay whenever `atelet` has a collector,
+and exports nothing when it has neither.
 
 Rather than editing the base manifests, prefer a kustomize overlay that
 replaces the `ate-otel-config` ConfigMap — see
@@ -438,12 +441,13 @@ lists instead of the base file, for a worked example.
 lifecycle records and the ateworkers' usage samples, through
 `serverboot.InitLogging`. `OTEL_LOGS_EXPORTER=otlp` sends them over OTLP
 instead of stdout, and `otlp,console` to both; only the kind overlay sets it, to
-`otlp,console`. See
-[the same records over OTLP](../../observability.md#the-same-records-over-otlp).
+`otlp,console`, together with `ATE_WORKER_OTEL_LOGS_EXPORTER` for the
+ateworkers. See
+[the same records over OTLP](../../guides/observability.md#the-same-records-over-otlp).
 
 Everything else is stdout. `serverboot.InitLogger` writes structured JSON there,
 and `ateworker` wraps actor container output with the `ate.*` metadata labels
-described in [Actor Observability](../../observability.md). The ateworker relay
+described in [Actor Observability](../../guides/observability.md). The ateworker relay
 carries logs, traces, and metrics.
 
 Those labels sit in a nested group (`labels`, or `logging.googleapis.com/labels`
@@ -500,7 +504,7 @@ failure.
 
 ## Local Development (kind)
 
-`hack/install-ate-kind.sh` installs a collector plus a Jaeger all-in-one into
+`ate-setup --kind` installs a collector plus Jaeger into
 the `otel-system` namespace — see
 `manifests/ate-install/kind/otel-collector.yaml`. It is a single-replica
 Deployment, which is appropriate for a one-node kind cluster. The kind

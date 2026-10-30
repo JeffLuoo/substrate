@@ -103,8 +103,11 @@ type LoggingOptions struct {
 //
 // It returns (nil, nil) when neither the default OTLP exporter nor the
 // lifecycle OTLP exporter is enabled, and leaves the OTel global alone:
-// emitting then costs one Enabled check. Guard the shutdown on a nil provider,
-// unlike InitTracing which always returns one.
+// emitting then costs one Enabled check. The default exporter is off when the
+// exporter does not include otlp, or when a relay-capable component has
+// neither a relay connection nor an OTLP endpoint (see hasOTLPDestination).
+// Guard the shutdown on a nil provider, unlike InitTracing which always
+// returns one.
 //
 // The processor batches. These records sit on the actor resume and suspend
 // path, and exporting inside the emit call would put a blocking gRPC round trip
@@ -119,13 +122,17 @@ func InitLogging(ctx context.Context, opts LoggingOptions) (*sdklog.LoggerProvid
 	if opts.Exporter == nil {
 		return nil, fmt.Errorf("LoggingOptions.Exporter is required")
 	}
-	hasDefaultOTLP := opts.Exporter.Has(ExporterOTLP)
+	defaultReason, defaultLevel := otlpExportBlocked(opts.Exporter.Has(ExporterOTLP),
+		hasOTLPDestination(logsEndpointEnv, opts.RelayCapable, opts.ExporterConn))
+	hasDefaultOTLP := defaultReason == ""
 	hasLifecycle := opts.LifecycleOTLP.enabled()
-	// When the default exporter does not include otlp, actor events belong on
-	// stdout even if the extra lifecycle OTLP exporter installs a provider.
+	// When the default OTLP exporter is off, actor events belong on stdout
+	// even if the extra lifecycle OTLP exporter installs a provider.
 	actorevent.SetConsole(opts.Exporter.Has(ExporterConsole) || (hasLifecycle && !hasDefaultOTLP))
 	if !hasDefaultOTLP && !hasLifecycle {
-		slog.InfoContext(ctx, "OTLP logs export disabled", slog.String("exporter", opts.Exporter.String()))
+		slog.Log(ctx, defaultLevel, "OTLP logs export disabled",
+			slog.String("exporter", opts.Exporter.String()),
+			slog.String("reason", defaultReason))
 		return nil, nil
 	}
 
@@ -156,7 +163,7 @@ func newLoggerProvider(ctx context.Context, opts LoggingOptions) (*sdklog.Logger
 		sdklog.WithResource(res),
 	}
 
-	if opts.Exporter.Has(ExporterOTLP) {
+	if opts.Exporter.Has(ExporterOTLP) && hasOTLPDestination(logsEndpointEnv, opts.RelayCapable, opts.ExporterConn) {
 		// Matches the trace and metric exporters: GKE managed telemetry does not
 		// support validating the TLS certs of the collector.
 		expOpts := []otlploggrpc.Option{otlploggrpc.WithInsecure()}

@@ -22,12 +22,14 @@ import (
 	"testing"
 	"time"
 
+	"go.ate.dev/substrate/api/ateapi/v1"
 	"go.ate.dev/substrate/cmd/ateapi/internal/store"
 	"go.ate.dev/substrate/cmd/ateapi/internal/store/storetest"
 	"go.ate.dev/substrate/internal/actorevent"
+	"go.ate.dev/substrate/internal/apierror"
 	"go.ate.dev/substrate/internal/ateattr"
 	"go.ate.dev/substrate/internal/resources"
-	"go.ate.dev/substrate/pkg/proto/ateapipb"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
@@ -42,48 +44,48 @@ func TestActorStateChangeRecords(t *testing.T) {
 
 	tests := []struct {
 		name      string
-		seedState ateapipb.ActorState
-		seedOpts  []func(*ateapipb.Actor)
+		seedState ateapi.ActorState
+		seedOpts  []func(*ateapi.Actor)
 		// transition runs the workflow step that commits the new state.
-		transition func(t *testing.T, w *ActorWorkflow, ref resources.ActorRef, actor *ateapipb.Actor, tmpl *ateapipb.ActorTemplate)
+		transition func(t *testing.T, w *ActorWorkflow, ref resources.ActorRef, actor *ateapi.Actor, tmpl *ateapi.ActorTemplate)
 		wantOp     string
 		wantState  string
 		wantExtra  map[string]string
-		wantStored ateapipb.ActorState
+		wantStored ateapi.ActorState
 	}{
 		{
 			name:      "suspend marks the actor suspending",
-			seedState: ateapipb.ActorState_ACTOR_STATE_RUNNING,
-			transition: func(t *testing.T, w *ActorWorkflow, ref resources.ActorRef, actor *ateapipb.Actor, _ *ateapipb.ActorTemplate) {
-				markOnly(t, w, ref, actor, w.SuspendActor)
+			seedState: ateapi.ActorState_ACTOR_STATE_RUNNING,
+			transition: func(t *testing.T, w *ActorWorkflow, ref resources.ActorRef, actor *ateapi.Actor, _ *ateapi.ActorTemplate) {
+				markOnly(t, w, ref, actor, suspendSync)
 			},
 			wantOp:     ateattr.OperationSuspend,
 			wantState:  ateattr.ActorStateSuspending,
-			wantStored: ateapipb.ActorState_ACTOR_STATE_SUSPENDING,
+			wantStored: ateapi.ActorState_ACTOR_STATE_SUSPENDING,
 		},
 		{
 			name:      "pause marks the actor suspending",
-			seedState: ateapipb.ActorState_ACTOR_STATE_RUNNING,
-			transition: func(t *testing.T, w *ActorWorkflow, ref resources.ActorRef, actor *ateapipb.Actor, _ *ateapipb.ActorTemplate) {
-				markOnly(t, w, ref, actor, w.PauseActor)
+			seedState: ateapi.ActorState_ACTOR_STATE_RUNNING,
+			transition: func(t *testing.T, w *ActorWorkflow, ref resources.ActorRef, actor *ateapi.Actor, _ *ateapi.ActorTemplate) {
+				markOnly(t, w, ref, actor, suspendAsync)
 			},
 			wantOp:     ateattr.OperationSuspend,
 			wantState:  ateattr.ActorStateSuspending,
-			wantStored: ateapipb.ActorState_ACTOR_STATE_SUSPENDING,
+			wantStored: ateapi.ActorState_ACTOR_STATE_SUSPENDING,
 		},
 		{
 			name:      "finalize pause marks the actor suspended",
-			seedState: ateapipb.ActorState_ACTOR_STATE_SUSPENDING,
-			seedOpts: []func(*ateapipb.Actor){
-				withPauseInProgress(),
-				func(a *ateapipb.Actor) {
+			seedState: ateapi.ActorState_ACTOR_STATE_SUSPENDING,
+			seedOpts: []func(*ateapi.Actor){
+				withPauseInProgress(t),
+				func(a *ateapi.Actor) {
 					a.Status.AssignedNode = "node-1"
 					a.Status.WorkerAssignment = wireTestAssignment()
 				},
 			},
-			transition: func(t *testing.T, w *ActorWorkflow, ref resources.ActorRef, _ *ateapipb.Actor, _ *ateapipb.ActorTemplate) {
-				if _, err := w.PauseActor(context.Background(), ref); err != nil {
-					t.Fatalf("PauseActor: %v", err)
+			transition: func(t *testing.T, w *ActorWorkflow, ref resources.ActorRef, _ *ateapi.Actor, _ *ateapi.ActorTemplate) {
+				if _, err := w.SuspendActor(context.Background(), ref, suspendAsync); err != nil {
+					t.Fatalf("SuspendActor: %v", err)
 				}
 			},
 			wantOp:    ateattr.OperationSuspend,
@@ -92,19 +94,23 @@ func TestActorStateChangeRecords(t *testing.T) {
 				string(ateattr.WorkerPoolNamespaceKey): "worker-ns",
 				string(ateattr.WorkerPoolNameKey):      "pool",
 			},
-			wantStored: ateapipb.ActorState_ACTOR_STATE_SUSPENDED,
+			wantStored: ateapi.ActorState_ACTOR_STATE_SUSPENDED,
 		},
 		{
 			name:      "delete marks the actor deleting",
-			seedState: ateapipb.ActorState_ACTOR_STATE_SUSPENDED,
-			transition: func(t *testing.T, w *ActorWorkflow, ref resources.ActorRef, actor *ateapipb.Actor, _ *ateapipb.ActorTemplate) {
-				if _, err := w.ensureMarkedDeleting(context.Background(), ref, actor, false); err != nil {
+			seedState: ateapi.ActorState_ACTOR_STATE_SUSPENDED,
+			transition: func(t *testing.T, w *ActorWorkflow, ref resources.ActorRef, _ *ateapi.Actor, _ *ateapi.ActorTemplate) {
+				if _, err := w.ensureMarkedDeleting(context.Background(), ref, store.DeletePreconditions{}); err != nil {
 					t.Fatalf("ensureMarkedDeleting: %v", err)
+				}
+				// A retry finds the actor already marked and writes no second record.
+				if _, err := w.ensureMarkedDeleting(context.Background(), ref, store.DeletePreconditions{}); err != nil {
+					t.Fatalf("retried ensureMarkedDeleting: %v", err)
 				}
 			},
 			wantOp:     ateattr.OperationDelete,
 			wantState:  ateattr.ActorStateDeleting,
-			wantStored: ateapipb.ActorState_ACTOR_STATE_DELETING,
+			wantStored: ateapi.ActorState_ACTOR_STATE_DELETING,
 		},
 	}
 
@@ -116,9 +122,9 @@ func TestActorStateChangeRecords(t *testing.T) {
 
 			persistence := newTestPersistence(t)
 			storetest.MustCreateAtespace(t, ctx, persistence, tmplAtespace)
-			if _, err := persistence.CreateActorTemplate(ctx, &ateapipb.ActorTemplate{
-				Metadata: &ateapipb.ResourceMetadata{Atespace: tmplAtespace, Name: tmplName},
-				SnapshotConfig: &ateapipb.SnapshotConfig{
+			if _, err := persistence.CreateActorTemplate(ctx, &ateapi.ActorTemplate{
+				Metadata: &ateapi.ResourceMetadata{Atespace: tmplAtespace, Name: tmplName},
+				SnapshotConfig: &ateapi.SnapshotConfig{
 					StorageLocation: testStorageLocation,
 				},
 			}); err != nil {
@@ -179,20 +185,20 @@ func TestActorStateChangeRecords(t *testing.T) {
 	}
 }
 
-// markOnly runs a suspend or pause on a RUNNING actor only as far as its mark
-// step: the actor gets a worker to checkpoint on, but the atelet dial fails,
-// so the SUSPENDING mark is the only transition the workflow commits.
-func markOnly(t *testing.T, w *ActorWorkflow, ref resources.ActorRef, actor *ateapipb.Actor, run func(context.Context, resources.ActorRef) (*ateapipb.Actor, error)) {
+// markOnly runs a suspend (sync or async) on a RUNNING actor only as far as its
+// mark step: the actor gets a worker to checkpoint on, but the atelet dial
+// fails, so the SUSPENDING mark is the only transition the workflow commits.
+func markOnly(t *testing.T, w *ActorWorkflow, ref resources.ActorRef, actor *ateapi.Actor, mode suspendMode) {
 	t.Helper()
 	ctx := context.Background()
-	if _, err := w.store.UpdateActor(ctx, ref, store.PreconditionFrom(actor), func(toUpdate *ateapipb.Actor) error {
+	if _, err := w.store.UpdateActor(ctx, ref, store.PreconditionFrom(actor), func(toUpdate *ateapi.Actor) error {
 		toUpdate.Status.WorkerAssignment = wireTestAssignment()
 		return nil
 	}); err != nil {
 		t.Fatalf("UpdateActor: %v", err)
 	}
 	w.dialer = newDanglingDialer()
-	_, err := run(ctx, ref)
+	_, err := w.SuspendActor(ctx, ref, mode)
 	assertStoppedAtDial(t, err)
 }
 
@@ -205,10 +211,10 @@ func TestActorCreatedRecord(t *testing.T) {
 
 	persistence := newTestPersistence(t)
 	storetest.MustCreateAtespace(t, ctx, persistence, "ns")
-	storetest.MustCreateActor(t, ctx, persistence, &ateapipb.Actor{
-		Metadata:      &ateapipb.ResourceMetadata{Atespace: "team-a", Name: "id1"},
-		ActorTemplate: &ateapipb.ObjectRef{Atespace: "ns", Name: "tmpl1"},
-		Status:        &ateapipb.ActorStatus{State: ateapipb.ActorState_ACTOR_STATE_SUSPENDED},
+	storetest.MustCreateActor(t, ctx, persistence, &ateapi.Actor{
+		Metadata:      &ateapi.ResourceMetadata{Atespace: "team-a", Name: "id1"},
+		ActorTemplate: &ateapi.ObjectRef{Atespace: "ns", Name: "tmpl1"},
+		Status:        &ateapi.ActorStatus{State: ateapi.ActorState_ACTOR_STATE_SUSPENDED},
 	})
 	stored, err := persistence.GetActor(ctx, resources.ActorRef{Atespace: "team-a", Name: "id1"})
 	if err != nil {
@@ -240,18 +246,18 @@ func TestActorDeletedRecord(t *testing.T) {
 
 	persistence := newTestPersistence(t)
 	storetest.MustCreateAtespace(t, ctx, persistence, "ns")
-	if _, err := persistence.CreateActorTemplate(ctx, &ateapipb.ActorTemplate{
-		Metadata:       &ateapipb.ResourceMetadata{Atespace: "ns", Name: "tmpl1"},
-		SnapshotConfig: &ateapipb.SnapshotConfig{StorageLocation: testStorageLocation},
+	if _, err := persistence.CreateActorTemplate(ctx, &ateapi.ActorTemplate{
+		Metadata:       &ateapi.ResourceMetadata{Atespace: "ns", Name: "tmpl1"},
+		SnapshotConfig: &ateapi.SnapshotConfig{StorageLocation: testStorageLocation},
 	}); err != nil {
 		t.Fatalf("create template: %v", err)
 	}
 
 	actorRef := resources.ActorRef{Atespace: "team-a", Name: "id1"}
-	seedWorkflowActor(t, ctx, persistence, actorRef, "ns", "tmpl1", ateapipb.ActorState_ACTOR_STATE_DELETING)
-	actor, err := persistence.GetActor(ctx, actorRef)
+	seedWorkflowActor(t, ctx, persistence, actorRef, "ns", "tmpl1", ateapi.ActorState_ACTOR_STATE_DELETING)
+	actor, err := persistence.MarkActorForDeletion(ctx, actorRef, store.DeletePreconditions{}, nil)
 	if err != nil {
-		t.Fatalf("get actor: %v", err)
+		t.Fatalf("mark actor: %v", err)
 	}
 
 	w := &ActorWorkflow{store: persistence}
@@ -286,25 +292,25 @@ func TestActorStateChangeRecordSkippedOnConflict(t *testing.T) {
 
 	persistence := newTestPersistence(t)
 	storetest.MustCreateAtespace(t, ctx, persistence, "ns")
-	if _, err := persistence.CreateActorTemplate(ctx, &ateapipb.ActorTemplate{
-		Metadata:       &ateapipb.ResourceMetadata{Atespace: "ns", Name: "tmpl1"},
-		SnapshotConfig: &ateapipb.SnapshotConfig{StorageLocation: testStorageLocation},
+	if _, err := persistence.CreateActorTemplate(ctx, &ateapi.ActorTemplate{
+		Metadata:       &ateapi.ResourceMetadata{Atespace: "ns", Name: "tmpl1"},
+		SnapshotConfig: &ateapi.SnapshotConfig{StorageLocation: testStorageLocation},
 	}); err != nil {
 		t.Fatalf("create template: %v", err)
 	}
 
 	actorRef := resources.ActorRef{Atespace: "team-a", Name: "id1"}
-	seedWorkflowActor(t, ctx, persistence, actorRef, "ns", "tmpl1", ateapipb.ActorState_ACTOR_STATE_SUSPENDED)
+	seedWorkflowActor(t, ctx, persistence, actorRef, "ns", "tmpl1", ateapi.ActorState_ACTOR_STATE_RUNNING)
 	stale, err := persistence.GetActor(ctx, actorRef)
 	if err != nil {
 		t.Fatalf("get actor: %v", err)
 	}
 
 	// Bump the stored version so the workflow's precondition is stale.
-	if _, err := persistence.UpdateActor(ctx, actorRef, store.PreconditionFrom(stale), func(toUpdate *ateapipb.Actor) error {
+	if _, err := persistence.UpdateActor(ctx, actorRef, store.PreconditionFrom(stale), func(toUpdate *ateapi.Actor) error {
 		toUpdate.Status.LastAssignedGeneration = 1
-		toUpdate.Status.Snapshots = []*ateapipb.Snapshot{
-			newDurableSnapshot(1, ateapipb.SnapshotOwner_SNAPSHOT_OWNER_ACTOR, ateapipb.SnapshotFidelity_SNAPSHOT_FIDELITY_MEMORY, "", "someone-else", someActorSnapshotURI(t, testStorageLocation, "team-a", "someone-else"), ateapipb.SnapshotStorageStatus_SNAPSHOT_STORAGE_STATUS_PENDING),
+		toUpdate.Status.Snapshots = []*ateapi.Snapshot{
+			newDurableSnapshot(1, ateapi.SnapshotOwner_SNAPSHOT_OWNER_ACTOR, ateapi.SnapshotFidelity_SNAPSHOT_FIDELITY_MEMORY, "", "someone-else", someActorSnapshotURI(t, testStorageLocation, "team-a", "someone-else"), ateapi.SnapshotStorageState_SNAPSHOT_STORAGE_STATE_PENDING),
 		}
 		return nil
 	}); err != nil {
@@ -312,8 +318,8 @@ func TestActorStateChangeRecordSkippedOnConflict(t *testing.T) {
 	}
 
 	w := &ActorWorkflow{store: persistence}
-	if _, err := w.ensureMarkedDeleting(ctx, actorRef, stale, false); err == nil {
-		t.Fatal("ensureMarkedDeleting on a stale actor = nil, want a conflict")
+	if _, err := w.ensureMarkedDeleting(ctx, actorRef, store.DeletePreconditions{Version: stale.GetMetadata().GetVersion()}); apierror.Code(err) != codes.Aborted {
+		t.Fatalf("ensureMarkedDeleting with a stale guard = %v, want ABORTED", err)
 	}
 	if len(*records) != 0 {
 		t.Errorf("got %d state records from a losing writer, want 0: %v", len(*records), *records)
@@ -334,40 +340,36 @@ func TestClosingLifecycleRecordsCarryActivationFields(t *testing.T) {
 		poolName     = "pool"
 	)
 
-	seedBoundActor := func(t *testing.T, ctx context.Context, st store.Interface, state ateapipb.ActorState, extraOpts ...func(*ateapipb.Actor)) (*ateapipb.Actor, *ateapipb.ActorTemplate, *ateapipb.Worker, *ateapipb.ActorAssignment) {
+	seedBoundActor := func(t *testing.T, ctx context.Context, st store.Interface, state ateapi.ActorState, extraOpts ...func(*ateapi.Actor)) (*ateapi.Actor, *ateapi.ActorTemplate, *ateapi.Worker, *ateapi.ActorAssignment) {
 		t.Helper()
 		storetest.MustCreateAtespace(t, ctx, st, tmplAtespace)
-		tmpl, err := st.CreateActorTemplate(ctx, &ateapipb.ActorTemplate{
-			Metadata:       &ateapipb.ResourceMetadata{Atespace: tmplAtespace, Name: tmplName},
-			SnapshotConfig: &ateapipb.SnapshotConfig{StorageLocation: testStorageLocation},
-			Resources: &ateapipb.Resources{
-				Limits: []*ateapipb.Limits{
-					{Name: resources.ResourceCPU, Quantity: "250m"},
-					{Name: resources.ResourceMemory, Quantity: "512Mi"},
-				},
+		tmpl, err := st.CreateActorTemplate(ctx, &ateapi.ActorTemplate{
+			Metadata:       &ateapi.ResourceMetadata{Atespace: tmplAtespace, Name: tmplName},
+			SnapshotConfig: &ateapi.SnapshotConfig{StorageLocation: testStorageLocation},
+			Resources: &ateapi.ResourceRequirements{
+				Limits: &ateapi.Resources{CpuMillicores: 250, MemoryBytes: 512 << 20},
 			},
 		})
 		if err != nil {
 			t.Fatalf("CreateActorTemplate: %v", err)
 		}
 
-		worker, err := st.CreateWorker(ctx, &ateapipb.Worker{
-			Metadata:        &ateapipb.ResourceMetadata{Name: workerName},
+		worker, err := st.CreateWorker(ctx, &ateapi.Worker{
+			Metadata:        &ateapi.ResourceMetadata{Name: workerName},
 			WorkerNamespace: poolNS,
 			WorkerPool:      poolName,
 			WorkerPod:       "pod-1",
 			WorkerPodUid:    "pod-uid-1",
 			NodeName:        "node-1",
-			SandboxClass:    "gvisor",
-			Status:          &ateapipb.WorkerStatus{},
+			Status:          &ateapi.WorkerStatus{},
 		})
 		if err != nil {
 			t.Fatalf("CreateWorker: %v", err)
 		}
 
 		actorRef := resources.ActorRef{Atespace: "team-a", Name: "id1"}
-		opts := append([]func(*ateapipb.Actor){
-			func(a *ateapipb.Actor) {
+		opts := append([]func(*ateapi.Actor){
+			func(a *ateapi.Actor) {
 				a.Status.AssignedNode = "node-1"
 				a.Status.WorkerAssignment = wireTestAssignment()
 				a.Status.WorkerAssignment.WorkerCapacityActors = 8
@@ -379,15 +381,10 @@ func TestClosingLifecycleRecordsCarryActivationFields(t *testing.T) {
 			t.Fatalf("GetActor: %v", err)
 		}
 
-		seedAssignment(t, st, workerName, &ateapipb.ActorAssignment{
-			Actor:    &ateapipb.ObjectRef{Atespace: actorRef.Atespace, Name: actorRef.Name},
-			ActorUid: actor.GetMetadata().GetUid(),
-			Resources: &ateapipb.Resources{
-				Limits: []*ateapipb.Limits{
-					{Name: resources.ResourceCPU, Quantity: "250m"},
-					{Name: resources.ResourceMemory, Quantity: "512Mi"},
-				},
-			},
+		seedAssignment(t, st, workerName, &ateapi.ActorAssignment{
+			Actor:     &ateapi.ObjectRef{Atespace: actorRef.Atespace, Name: actorRef.Name},
+			ActorUid:  actor.GetMetadata().GetUid(),
+			Resources: &ateapi.Resources{CpuMillicores: 250, MemoryBytes: 512 << 20},
 		})
 		assignment, err := st.GetWorkerAssignment(ctx, workerName, actor.GetMetadata().GetUid())
 		if err != nil {
@@ -396,7 +393,7 @@ func TestClosingLifecycleRecordsCarryActivationFields(t *testing.T) {
 		return actor, tmpl, worker, assignment
 	}
 
-	assertActivationAttrs := func(t *testing.T, got map[string]string, assignment *ateapipb.ActorAssignment) {
+	assertActivationAttrs := func(t *testing.T, got map[string]string, assignment *ateapi.ActorAssignment) {
 		t.Helper()
 		wantEpoch := strconv.FormatInt(assignment.GetMetadata().GetCreateTime().AsTime().UnixNano(), 10)
 		want := map[string]string{
@@ -418,10 +415,10 @@ func TestClosingLifecycleRecordsCarryActivationFields(t *testing.T) {
 		ctx := context.Background()
 		events := otlpEvents(t)
 		st := newTestPersistence(t)
-		actor, _, _, assignment := seedBoundActor(t, ctx, st, ateapipb.ActorState_ACTOR_STATE_SUSPENDING, withPauseInProgress())
+		actor, _, _, assignment := seedBoundActor(t, ctx, st, ateapi.ActorState_ACTOR_STATE_SUSPENDING, withPauseInProgress(t))
 		w, _ := newWireCaptureWorkflow(t, st)
-		if _, err := w.PauseActor(ctx, resources.ActorRefFromActor(actor)); err != nil {
-			t.Fatalf("PauseActor: %v", err)
+		if _, err := w.SuspendActor(ctx, resources.ActorRefFromActor(actor), suspendAsync); err != nil {
+			t.Fatalf("SuspendActor: %v", err)
 		}
 		gotEvents := events()
 		if len(gotEvents) != 1 {
@@ -434,7 +431,7 @@ func TestClosingLifecycleRecordsCarryActivationFields(t *testing.T) {
 		ctx := context.Background()
 		events := otlpEvents(t)
 		st := newTestPersistence(t)
-		actor, _, _, assignment := seedBoundActor(t, ctx, st, ateapipb.ActorState_ACTOR_STATE_REVERTING)
+		actor, _, _, assignment := seedBoundActor(t, ctx, st, ateapi.ActorState_ACTOR_STATE_REVERTING)
 		w, _ := newWireCaptureWorkflow(t, st)
 		if _, err := w.RevertActor(ctx, resources.ActorRefFromActor(actor)); err != nil {
 			t.Fatalf("RevertActor: %v", err)
@@ -450,9 +447,9 @@ func TestClosingLifecycleRecordsCarryActivationFields(t *testing.T) {
 		ctx := context.Background()
 		events := otlpEvents(t)
 		st := newTestPersistence(t)
-		actor, _, _, assignment := seedBoundActor(t, ctx, st, ateapipb.ActorState_ACTOR_STATE_DELETING)
+		actor, _, _, assignment := seedBoundActor(t, ctx, st, ateapi.ActorState_ACTOR_STATE_DELETING)
 		w, _ := newWireCaptureWorkflow(t, st)
-		if _, err := w.DeleteActor(ctx, resources.ActorRefFromActor(actor), true, store.DeletePreconditions{}); err != nil {
+		if _, err := w.DeleteActor(ctx, resources.ActorRefFromActor(actor), store.DeletePreconditions{}); err != nil {
 			t.Fatalf("DeleteActor: %v", err)
 		}
 		gotEvents := events()
@@ -469,7 +466,7 @@ func TestClosingLifecycleRecordsCarryActivationFields(t *testing.T) {
 		ctx := context.Background()
 		events := otlpEvents(t)
 		st := newTestPersistence(t)
-		actor, _, _, assignment := seedBoundActor(t, ctx, st, ateapipb.ActorState_ACTOR_STATE_RUNNING)
+		actor, _, _, assignment := seedBoundActor(t, ctx, st, ateapi.ActorState_ACTOR_STATE_RUNNING)
 		if err := crashActor(ctx, st, resources.ActorRefFromActor(actor), ateattr.OperationResume, "boom"); err != nil {
 			t.Fatalf("crashActor: %v", err)
 		}
@@ -485,8 +482,8 @@ func TestClosingLifecycleRecordsCarryActivationFields(t *testing.T) {
 		ctx := context.Background()
 		events := otlpEvents(t)
 		st := newTestPersistence(t)
-		_, _, worker, assignment := seedBoundActor(t, ctx, st, ateapipb.ActorState_ACTOR_STATE_RUNNING)
-		ww := NewWorkerWorkflow(st)
+		_, _, worker, assignment := seedBoundActor(t, ctx, st, ateapi.ActorState_ACTOR_STATE_RUNNING)
+		ww := NewWorkerWorkflow(st, newNodeAteletDialer(t, &capturingTerminator{}))
 		if _, err := ww.DeleteWorker(ctx, worker.GetMetadata().GetName(), store.DeletePreconditions{}); err != nil {
 			t.Fatalf("DeleteWorker: %v", err)
 		}
@@ -512,7 +509,7 @@ func TestActivationCloseAttrsFallbacks(t *testing.T) {
 		return got
 	}
 
-	got := attrsOf(activationCloseAttrs(&ateapipb.WorkerAssignment{
+	got := attrsOf(activationCloseAttrs(&ateapi.WorkerAssignment{
 		WorkerNamespace:      "worker-ns",
 		WorkerPool:           "pool",
 		ActivationStartTime:  timestamppb.New(start),
@@ -528,7 +525,7 @@ func TestActivationCloseAttrsFallbacks(t *testing.T) {
 		t.Errorf("attrs = %v, want %v", got, want)
 	}
 
-	got = attrsOf(activationCloseAttrs(&ateapipb.WorkerAssignment{WorkerNamespace: "worker-ns", WorkerPool: "pool"}, nil, nil))
+	got = attrsOf(activationCloseAttrs(&ateapi.WorkerAssignment{WorkerNamespace: "worker-ns", WorkerPool: "pool"}, nil, nil))
 	if _, ok := got[string(ateattr.WorkerPoolCapacityActorsKey)]; ok {
 		t.Errorf("capacity attr present with no reported capacity: %v", got)
 	}
