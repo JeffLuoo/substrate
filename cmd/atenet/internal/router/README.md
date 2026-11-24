@@ -26,7 +26,9 @@ Router has several responsibilities:
 * Authenticates actor identity on egress: on every CONNECT, the egress
   gateway's ext_proc handler re-verifies the actor's client certificate against
   the actor-identity CA, reads the actor from its SPIFFE URI SAN, and checks
-  with the ATE API that the actor exists and is running.
+  with the ATE API that the actor exists and is running. When the certificate
+  carries the `ActorIdentity` X.509 extension, the handler also checks the
+  certified UID against the ATE API.
 * Authorizes egress against the actor's `EgressPolicy`: every request the
   gateway can read is decided on its `Host` and the port the actor dialed,
   the most specific rule winning; TLS it does not terminate is decided by SNI
@@ -138,6 +140,8 @@ keys only the router's generated Envoy config reads, which stay in `xds.go`.
 | `dev.ate.target.actor` | ingress | carries the actor routing target across CONNECT re-entry |
 | `dev.ate.connect.authority` | ingress, egress | carries the outer CONNECT authority across re-entry: target-port selection on ingress, the dialed port the request legs match `ports` against on egress |
 | `dev.ate.actor.identity` | egress | carries the authenticated actor identity to the policy ext_proc, the logs and additional ext_proc services |
+| `dev.ate.actor.uid` | egress | carries the verified actor UID from the CONNECT leg's `ateapi` lookup and certificate extension check to the logs and additional ext_proc services |
+| `dev.ate.actor.template` | egress | carries the actor's template name (best-effort, from the CONNECT leg's `ateapi` lookup) to the logs and additional ext_proc services |
 | `dev.ate.policy.egress` | egress | dynamic metadata: the CONNECT leg's SNI rules for the dialed port, which the egress-policy module stores by hash |
 | `dev.ate.policy.egress.hash` | egress | filter state: the hash the inner listener looks those SNI rules up by |
 | `dev.ate.egress:dialed_port` | egress | dynamic metadata: the CONNECT leg's answer, the port the passthrough chain dials the resolved SNI on |
@@ -146,6 +150,8 @@ keys only the router's generated Envoy config reads, which stay in `xds.go`.
 | `dev.ate.egress.filter_chain` | egress | filter state: the egress-policy module's verdict, which selects the inner filter chain |
 | `dev.ate.extproc.direction` | egress | selects the egress handler for dataplanes without Envoy filter chains |
 | `dev.ate.tunnel.{key,worker,actor,port}` | ingress | filter state: the routing decision carried into `actor_connect` (declared in `xds.go`) |
+| `source.spiffeId` | egress | agentgateway CEL variable carrying the verified peer certificate's SPIFFE URI SAN across `dynamicCa` re-entry to additional `ext_proc` services |
+| `source.certificate` | egress | agentgateway CEL variable carrying the verified PEM leaf certificate (including the `ActorIdentity` X.509 extension with the actor UID) across `dynamicCa` re-entry to additional `ext_proc` services |
 
 ### name it
 

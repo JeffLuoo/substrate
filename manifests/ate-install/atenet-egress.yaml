@@ -266,6 +266,26 @@ data:
                       text_format_source:
                         inline_string: "%DYNAMIC_METADATA(dev.ate.egress:dialed_port)%"
                       omit_empty_values: true
+                  # The verified actor UID and template name from the CONNECT
+                  # leg's ateapi lookup, shared with the inner listener so logs
+                  # and additional ext_proc filters can attribute traffic to an
+                  # immutable actor UID and template without a second lookup.
+                  - object_key: dev.ate.actor.uid
+                    factory_key: envoy.hashable_string
+                    skip_if_empty: true
+                    shared_with_upstream: ONCE
+                    format_string:
+                      text_format_source:
+                        inline_string: "%DYNAMIC_METADATA(dev.ate.egress:actor_uid)%"
+                      omit_empty_values: true
+                  - object_key: dev.ate.actor.template
+                    factory_key: envoy.hashable_string
+                    skip_if_empty: true
+                    shared_with_upstream: ONCE
+                    format_string:
+                      text_format_source:
+                        inline_string: "%DYNAMIC_METADATA(dev.ate.egress:actor_template)%"
+                      omit_empty_values: true
                   # Workaround for dynamic module inability to store filter state that is shared with the upstream.
                   # TODO(yanavlasov): Remove after Envoy v1.40 is released.
                   - object_key: dev.ate.policy.egress.hash
@@ -304,10 +324,11 @@ data:
       # #ATE_MITM_EXTPROC_CLUSTER in the cluster list: inert comments until
       # ate-setup is run with
       # --experimental-additional-egress-extproc-service, which replaces each
-      # with a generated block for an additional, external processor. The
-      # marker sits below the policy filter, so that processor sees only
-      # requests the policy allowed, including any headers the policy added; a
-      # request the policy denies never reaches it.
+      # with a generated block for an additional, external processor, or with
+      # the filters --experimental-additional-egress-extproc-filters-file
+      # lists. The marker sits below the policy filter, so that processor sees
+      # only requests the policy allowed, including any headers the policy
+      # added; a request the policy denies never reaches it.
       #
       # The passthrough chain is a tcp_proxy, so it has no HTTP filters of its
       # own, and it decides nothing: the module already matched the SNI to a
@@ -342,6 +363,8 @@ data:
                 leg: clienthello
                 time: "%START_TIME%"
                 actor: "%FILTER_STATE(dev.ate.actor.identity:PLAIN)%"
+                actor_uid: "%FILTER_STATE(dev.ate.actor.uid:PLAIN)%"
+                actor_template: "%FILTER_STATE(dev.ate.actor.template:PLAIN)%"
                 sni: "%REQUESTED_SERVER_NAME%"
                 chain: "%FILTER_STATE(dev.ate.egress.filter_chain:PLAIN)%"
                 destination: "%FILTER_STATE(dev.ate.connect.authority:PLAIN)%"
@@ -459,6 +482,8 @@ data:
                       leg: mitm
                       time: "%START_TIME%"
                       actor: "%FILTER_STATE(dev.ate.actor.identity:PLAIN)%"
+                      actor_uid: "%FILTER_STATE(dev.ate.actor.uid:PLAIN)%"
+                      actor_template: "%FILTER_STATE(dev.ate.actor.template:PLAIN)%"
                       sni: "%REQUESTED_SERVER_NAME%"
                       authority: "%REQ(:AUTHORITY)%"
                       method: "%REQ(:METHOD)%"
@@ -717,6 +742,8 @@ data:
                       leg: cleartext
                       time: "%START_TIME%"
                       actor: "%FILTER_STATE(dev.ate.actor.identity:PLAIN)%"
+                      actor_uid: "%FILTER_STATE(dev.ate.actor.uid:PLAIN)%"
+                      actor_template: "%FILTER_STATE(dev.ate.actor.template:PLAIN)%"
                       authority: "%REQ(:AUTHORITY)%"
                       method: "%REQ(:METHOD)%"
                       path: "%PATH(NQ:ORIG_OR_PATH)%"
@@ -855,6 +882,8 @@ data:
                       leg: passthrough
                       time: "%START_TIME%"
                       actor: "%FILTER_STATE(dev.ate.actor.identity:PLAIN)%"
+                      actor_uid: "%FILTER_STATE(dev.ate.actor.uid:PLAIN)%"
+                      actor_template: "%FILTER_STATE(dev.ate.actor.template:PLAIN)%"
                       # The name the rule matched and the gateway dialed.
                       sni: "%REQUESTED_SERVER_NAME%"
                       # What the actor dialed; upstream is where the connection went.
