@@ -713,7 +713,7 @@ func TestSnapshotLocationChange_LeavesNothingBehind(t *testing.T) {
 		}
 	})
 
-	stored, err := w.ensureSuspendedFinalized(ctx, actorRef, suspendSync, nil)
+	stored, err := w.ensureSuspendedFinalized(ctx, actorRef, nil, suspendSync, nil)
 	if err != nil {
 		t.Fatalf("ensureSuspendedFinalized: %v", err)
 	}

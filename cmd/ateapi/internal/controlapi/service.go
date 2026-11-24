@@ -51,6 +51,10 @@ type RPCService struct {
 
 	actorJWTIssuer string
 	actorIDJWTPool localjwtauthority.Pool
+
+	// prefixOwners restricts prefixed label keys and hold names to their
+	// owners. Nil leaves every prefix open.
+	prefixOwners PrefixOwners
 }
 
 var _ ateapi.ControlServer = (*RPCService)(nil)
@@ -105,6 +109,18 @@ func NewRPCService(
 	s.actorWorkflow.clusterSnapshotLocation = snapshotLocation
 	s.workerWorkflow = NewWorkerWorkflow(impl, dialer)
 	return s
+}
+
+// SetLabelActorVolumes configures whether CreateVolume calls append sanitized
+// ate_atespace and ate_actor_uid labels to CSI StorageClass parameters["labels"].
+func (s *RPCService) SetLabelActorVolumes(enabled bool) {
+	s.actorWorkflow.labelActorVolumes = enabled
+}
+
+// SetPrefixOwners restricts the label keys and hold names under each listed
+// "<prefix>/" to the principals listed for it.
+func (s *RPCService) SetPrefixOwners(owners PrefixOwners) {
+	s.prefixOwners = owners
 }
 
 // serviceStore enumerates the exact storage methods needed by

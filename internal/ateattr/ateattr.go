@@ -19,6 +19,7 @@
 package ateattr
 
 import (
+	"encoding/json"
 	"log/slog"
 	"slices"
 
@@ -177,20 +178,67 @@ const (
 //
 // ActorEpochKey identifies one activation of an actor, a Run or Restore, as the
 // unix-nano time it began. It is the boundary of ate.stats.cpu.time, which
-// restarts at zero with each activation.
+// restarts at zero with each activation, and is also stamped on the closing
+// lifecycle record that ends an activation. ActorBookedCPUKey (cores) and
+// ActorBookedMemoryKey (bytes) carry the resource reservation that activation
+// booked on its worker. WorkerPoolCapacityActorsKey is the actor slot capacity
+// of that worker, so a consumer can price one slot when nothing was booked.
 const (
-	ActorEpochKey            = attribute.Key("ate.actor.epoch")
-	StatsKindKey             = attribute.Key("ate.stats.kind")
-	StatsMemoryUsageKey      = attribute.Key("ate.stats.memory.usage")
-	StatsMemoryPeakKey       = attribute.Key("ate.stats.memory.peak")
-	StatsMemoryWorkingSetKey = attribute.Key("ate.stats.memory.working_set")
-	StatsCPUTimeKey          = attribute.Key("ate.stats.cpu.time")
+	ActorEpochKey               = attribute.Key("ate.actor.epoch")
+	ActorBookedCPUKey           = attribute.Key("ate.actor.booked.cpu")
+	ActorBookedMemoryKey        = attribute.Key("ate.actor.booked.memory")
+	WorkerPoolCapacityActorsKey = attribute.Key("ate.workerpool.capacity.actors")
+	StatsKindKey                = attribute.Key("ate.stats.kind")
+	StatsMemoryUsageKey         = attribute.Key("ate.stats.memory.usage")
+	StatsMemoryPeakKey          = attribute.Key("ate.stats.memory.peak")
+	StatsMemoryWorkingSetKey    = attribute.Key("ate.stats.memory.working_set")
+	StatsCPUTimeKey             = attribute.Key("ate.stats.cpu.time")
 )
 
 // SandboxOOMKillsKey is memory.events' oom_kill for the sandbox cgroup leaf, on
 // the record ateworker-gvisor writes when a hosted actor's sandbox has no process
 // left. Logs only: it is only ever recorded beside actor identity.
 const SandboxOOMKillsKey = attribute.Key("ate.sandbox.oom_kills")
+
+// Keys of the actor external volume lifecycle events (ate.actor.volume_provisioned
+// and ate.actor.volume_deleted). Logs only: volume names, CSI request names, and
+// driver-returned storage volume IDs are per-actor or unbounded.
+const (
+	VolumeNameKey          = attribute.Key("ate.volume.name")
+	VolumeCSINameKey       = attribute.Key("ate.volume.csi_name")
+	VolumeStorageIDKey     = attribute.Key("ate.volume.storage_volume_id")
+	VolumeStorageClassKey  = attribute.Key("ate.volume.storage_class")
+	VolumeDriverKey        = attribute.Key("ate.volume.driver")
+	VolumeCapacityBytesKey = attribute.Key("ate.volume.capacity_bytes")
+)
+
+// Keys of the actor label and hold events (ate.actor.labels_changed and
+// ate.actor.hold_changed). ActorLabelsKey is the actor's labels as one JSON
+// object. Logs only: label values and hold reasons are per-actor or unbounded.
+const (
+	ActorLabelsKey      = attribute.Key("ate.actor.labels")
+	ActorHoldNameKey    = attribute.Key("ate.actor.hold.name")
+	ActorHoldActionKey  = attribute.Key("ate.actor.hold.action")
+	ActorHoldReasonKey  = attribute.Key("ate.actor.hold.reason")
+	ActorHoldCreatorKey = attribute.Key("ate.actor.hold.created_by")
+)
+
+// Values for ActorHoldActionKey.
+const (
+	HoldActionAdded   = "added"
+	HoldActionRemoved = "removed"
+)
+
+// ActorLabelsValue encodes labels as a JSON object with sorted keys, the value
+// of ActorLabelsKey. A nil or empty map encodes as "{}".
+func ActorLabelsValue(labels map[string]string) string {
+	if len(labels) == 0 {
+		return "{}"
+	}
+	// encoding/json sorts map keys, and a map[string]string cannot fail.
+	b, _ := json.Marshal(labels)
+	return string(b)
+}
 
 // Values for StatsKindKey. An initial or final sample brackets an activation; a
 // periodic one is the timer's.

@@ -3380,6 +3380,15 @@ func TestWorkerAssignmentFromCopiesSPIFFEID(t *testing.T) {
 	}
 }
 
+func TestWorkerAssignmentFromCopiesCapacityActors(t *testing.T) {
+	got := workerAssignmentFrom(&ateapi.Worker{
+		Status: &ateapi.WorkerStatus{Capacity: &ateapi.WorkerResources{Actors: 12}},
+	}, hardware.Requirement{})
+	if got.GetWorkerCapacityActors() != 12 {
+		t.Errorf("worker capacity actors = %d, want 12", got.GetWorkerCapacityActors())
+	}
+}
+
 func TestToAteletSandboxRuntime(t *testing.T) {
 	tests := []struct {
 		name string

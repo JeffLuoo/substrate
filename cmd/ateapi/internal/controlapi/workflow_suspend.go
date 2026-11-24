@@ -130,7 +130,7 @@ func (w *ActorWorkflow) SuspendActor(ctx context.Context, actorRef resources.Act
 	// the one requested.
 	finalAttrs = lifecycleOpAttrs(actor, "", wireFidelity)
 	var finalized *ateapi.Actor
-	if finalized, err = w.ensureSuspendedFinalized(leaseCtx, actorRef, mode, ateletState); err != nil {
+	if finalized, err = w.ensureSuspendedFinalized(leaseCtx, actorRef, actorTemplate, mode, ateletState); err != nil {
 		return nil, err
 	}
 	actor = finalized
@@ -319,7 +319,7 @@ func (w *ActorWorkflow) ensureVolumesDetached(ctx context.Context, actor *ateapi
 // FailedPrecondition.
 // ateletState is the state atelet returned from Checkpoint, applied in the
 // same update. A state that conflicts with the record crashes the actor.
-func (w *ActorWorkflow) ensureSuspendedFinalized(ctx context.Context, actorRef resources.ActorRef, mode suspendMode, ateletState *ateletpb.ActorSnapshotState) (_ *ateapi.Actor, err error) {
+func (w *ActorWorkflow) ensureSuspendedFinalized(ctx context.Context, actorRef resources.ActorRef, actorTemplate *ateapi.ActorTemplate, mode suspendMode, ateletState *ateletpb.ActorSnapshotState) (_ *ateapi.Actor, err error) {
 	ctx, done := stepSpan(ctx, "FinalizeSuspended")
 	defer func() { err = done(err) }()
 
@@ -373,6 +373,13 @@ func (w *ActorWorkflow) ensureSuspendedFinalized(ctx context.Context, actorRef r
 		return nil, crashActorAndFail(ctx, w.store, actorRef, ateattr.OperationSuspend, crashMessageSnapshotStateConflict)
 	}
 
+	workerAssignment := latestActor.GetStatus().GetWorkerAssignment()
+	actorAssignment, err := readActorAssignment(ctx, w.store, latestActor)
+	if err != nil {
+		return nil, err
+	}
+	closeAttrs := activationCloseAttrs(workerAssignment, actorAssignment, actorTemplate)
+
 	// 1. Free the worker and finalize the actor in one write: record its new
 	// snapshot and mark it SUSPENDED. The precondition pins the version checked
 	// above, so an out-of-band write since then fails the update instead of
@@ -403,7 +410,7 @@ func (w *ActorWorkflow) ensureSuspendedFinalized(ctx context.Context, actorRef r
 	if err != nil {
 		return nil, actorWriteError(actorRef, err)
 	}
-	logActorStateChanged(ctx, storedActor, ateattr.OperationSuspend)
+	logActorStateChanged(ctx, storedActor, ateattr.OperationSuspend, closeAttrs...)
 
 	// 2. Release the external snapshots this suspend replaced. Best-effort: the
 	// new snapshot is committed and the worker is gone, so failing the

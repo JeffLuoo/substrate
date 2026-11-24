@@ -16,6 +16,7 @@ package controlapi
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -130,10 +131,18 @@ func crashActor(ctx context.Context, st crashActorStore, actorRef resources.Acto
 	wasAlreadyCrashed := actor.GetStatus().GetState() == ateapi.ActorState_ACTOR_STATE_CRASHED
 	opName = ateattr.NormalizeOperationName(opName)
 
+	// Read the ActorAssignment row before UpdateActorAndRelease deletes it so
+	// the closing crash event can record its booked resources and epoch.
+	actorAssignment, err := readActorAssignment(ctx, st, actor)
+	if err != nil {
+		return fmt.Errorf("while reading worker assignment to crash actor: %w", err)
+	}
+
 	// Snapshot crash attributes before pod and pool pointers are cleared below;
 	// the counter itself is emitted only after the transition commits.
 	sandboxClass := actor.GetStatus().GetWorkerAssignment().GetSandboxRuntime().GetSandboxClass()
 	crashAttrs := ateattr.ActorMetricAttributes(actor, sandboxClass, opName)
+	closeAttrs := activationCloseAttrs(actor.GetStatus().GetWorkerAssignment(), actorAssignment, nil)
 
 	// The worker is released in the same write, so a failure leaves both the
 	// actor and its assignment for the caller's retry.
@@ -155,7 +164,7 @@ func crashActor(ctx context.Context, st crashActorStore, actorRef resources.Acto
 
 	// Count the crash only once it has committed.
 	if !wasAlreadyCrashed {
-		logActorCrashed(ctx, actor, opName)
+		logActorCrashed(ctx, actor, opName, closeAttrs...)
 		recordActorCrash(ctx, crashAttrs)
 	}
 	return nil
@@ -180,10 +189,12 @@ func newActorCrash(opName, message string) *ateapi.ActorCrash {
 // It names ate.actor.state for the same reason worker's lifecycle records do: a
 // crash is the one transition worker never observes, so a consumer taking the
 // last state an actor reached has to see this record to reach "crashed" at all.
-func logActorCrashed(ctx context.Context, actor *ateapi.Actor, opName string) {
+func logActorCrashed(ctx context.Context, actor *ateapi.Actor, opName string, extra ...slog.Attr) {
 	attrs := ateattr.ActorLogAttrs(resources.ActorAttributionFromActor(actor))
 	attrs = append(attrs, slog.String(string(ateattr.ActorOperationNameKey), ateattr.NormalizeOperationName(opName)))
 	attrs = append(attrs, slog.String(string(ateattr.ActorStateKey), ateattr.ActorStateCrashed))
+	attrs = append(attrs, extra...)
+	attrs = appendActorLabels(attrs, actor)
 	actorevent.Log(ctx, actorevent.Crashed, attrs)
 }
 
@@ -191,5 +202,26 @@ func logActorCrashed(ctx context.Context, actor *ateapi.Actor, opName string) {
 // an actor.
 type crashActorStore interface {
 	GetActor(ctx context.Context, actorRef resources.ActorRef) (*ateapi.Actor, error)
+	GetWorkerAssignment(ctx context.Context, workerName, actorUID string) (*ateapi.ActorAssignment, error)
 	UpdateActorAndRelease(ctx context.Context, actorRef resources.ActorRef, precondition store.Precondition, mutate func(toUpdate *ateapi.Actor) error) (*ateapi.Actor, error)
+}
+
+// readActorAssignment fetches the ActorAssignment row for actor's active
+// WorkerAssignment so closing lifecycle events can record its booked resources
+// and creation timestamp before UpdateActorAndRelease deletes the row.
+func readActorAssignment(ctx context.Context, getter interface {
+	GetWorkerAssignment(ctx context.Context, workerName, actorUID string) (*ateapi.ActorAssignment, error)
+}, actor *ateapi.Actor) (*ateapi.ActorAssignment, error) {
+	wa := actor.GetStatus().GetWorkerAssignment()
+	if wa == nil || wa.GetWorker().GetName() == "" {
+		return nil, nil
+	}
+	aa, err := getter.GetWorkerAssignment(ctx, wa.GetWorker().GetName(), actor.GetMetadata().GetUid())
+	if errors.Is(err, store.ErrNotFound) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("while reading worker assignment: %w", err)
+	}
+	return aa, nil
 }

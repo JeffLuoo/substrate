@@ -87,6 +87,18 @@ var identityKeys = []string{
 	string(ateattr.TemplateNameKey),
 }
 
+// activationCloseKeys are the conditional attributes stamped on a closing
+// lifecycle record (suspended, reverted, deleted, or crashed) when the
+// transition releases an active worker assignment.
+var activationCloseKeys = []string{
+	string(ateattr.ActorEpochKey),
+	string(ateattr.ActorBookedCPUKey),
+	string(ateattr.ActorBookedMemoryKey),
+	string(ateattr.WorkerPoolNamespaceKey),
+	string(ateattr.WorkerPoolNameKey),
+	string(ateattr.WorkerPoolCapacityActorsKey),
+}
+
 // Three names. A crash is its own because it has a different severity; there
 // is no name per state, because ate.actor.state already says which transition
 // happened. UsageSampled is the workers' measurement record.
@@ -98,6 +110,8 @@ var (
 		Keys: append(append([]string{}, identityKeys...),
 			string(ateattr.ActorOperationNameKey),
 			string(ateattr.ActorStateKey)),
+		Conditional: append(append([]string{}, activationCloseKeys...),
+			string(ateattr.ActorLabelsKey)),
 	}
 
 	Crashed = Event{
@@ -107,6 +121,8 @@ var (
 		Keys: append(append([]string{}, identityKeys...),
 			string(ateattr.ActorOperationNameKey),
 			string(ateattr.ActorStateKey)),
+		Conditional: append(append([]string{}, activationCloseKeys...),
+			string(ateattr.ActorLabelsKey)),
 	}
 
 	UsageSampled = Event{
@@ -129,11 +145,79 @@ var (
 			string(ateattr.StatsCPUTimeKey),
 		},
 	}
+
+	VolumeProvisioned = Event{
+		Name:     "ate.actor.volume_provisioned",
+		Body:     "Actor volume provisioned",
+		Severity: log.SeverityInfo,
+		Keys: append(append([]string{}, identityKeys...),
+			string(ateattr.VolumeNameKey),
+			string(ateattr.VolumeCSINameKey),
+			string(ateattr.VolumeStorageIDKey),
+			string(ateattr.VolumeStorageClassKey),
+			string(ateattr.VolumeDriverKey),
+			string(ateattr.VolumeCapacityBytesKey)),
+		Conditional: []string{string(ateattr.ActorLabelsKey)},
+	}
+
+	LabelsChanged = Event{
+		Name:     "ate.actor.labels_changed",
+		Body:     "Actor labels changed",
+		Severity: log.SeverityInfo,
+		Keys: append(append([]string{}, identityKeys...),
+			string(ateattr.ActorLabelsKey)),
+	}
+
+	HoldChanged = Event{
+		Name:     "ate.actor.hold_changed",
+		Body:     "Actor hold changed",
+		Severity: log.SeverityInfo,
+		Keys: append(append([]string{}, identityKeys...),
+			string(ateattr.ActorHoldNameKey),
+			string(ateattr.ActorHoldActionKey),
+			string(ateattr.ActorStateKey)),
+		Conditional: []string{
+			string(ateattr.ActorHoldReasonKey),
+			string(ateattr.ActorHoldCreatorKey),
+			string(ateattr.ActorLabelsKey),
+		},
+	}
+
+	VolumeDeleted = Event{
+		Name:     "ate.actor.volume_deleted",
+		Body:     "Actor volume deleted",
+		Severity: log.SeverityInfo,
+		Keys: append(append([]string{}, identityKeys...),
+			string(ateattr.VolumeNameKey),
+			string(ateattr.VolumeCSINameKey),
+			string(ateattr.VolumeStorageIDKey),
+			string(ateattr.VolumeDriverKey)),
+		// Absent when the ActorTemplate was deleted before the actor and its
+		// volume spec can no longer be resolved.
+		Conditional: []string{
+			string(ateattr.VolumeStorageClassKey),
+			string(ateattr.VolumeCapacityBytesKey),
+			string(ateattr.ActorLabelsKey),
+		},
+	}
 )
 
 // events is the whole vocabulary, which the registry test walks. An event left
 // out of it is never checked against docs/metrics/registry/events.yaml.
-var events = []Event{StateChanged, Crashed, UsageSampled}
+var events = []Event{StateChanged, Crashed, UsageSampled, VolumeProvisioned, VolumeDeleted, LabelsChanged, HoldChanged}
+
+// IsLifecycleEvent reports whether eventName is an actor lifecycle event
+// (ate.actor.state_changed, ate.actor.crashed, ate.actor.volume_provisioned,
+// ate.actor.volume_deleted, ate.actor.labels_changed, or
+// ate.actor.hold_changed).
+func IsLifecycleEvent(eventName string) bool {
+	return eventName == StateChanged.Name ||
+		eventName == Crashed.Name ||
+		eventName == VolumeProvisioned.Name ||
+		eventName == VolumeDeleted.Name ||
+		eventName == LabelsChanged.Name ||
+		eventName == HoldChanged.Name
+}
 
 // BuildRecord turns the stdout record into its OTLP form. Attributes carry
 // everything machine-readable, so the body stays the display string.

@@ -149,6 +149,12 @@ cardinality_rules:
       - ate.actor.version
       - ate.actor.container.name
       - ate.actor.epoch
+      - ate.volume.csi_name
+      - ate.volume.storage_volume_id
+      - ate.actor.labels
+      - ate.actor.hold.name
+      - ate.actor.hold.reason
+      - ate.actor.hold.created_by
   - id: bounded-or-catalog-scoped
     brief: >
       Each ate.* metric label has a list of permitted values, or it names an

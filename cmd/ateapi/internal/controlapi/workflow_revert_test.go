@@ -657,7 +657,7 @@ func TestEnsureRevertedFinalized_NoObjectStore(t *testing.T) {
 	}
 
 	actorRef := resources.ActorRefFromActor(actor)
-	finalized, err := w.ensureRevertedFinalized(ctx, actorRef)
+	finalized, err := w.ensureRevertedFinalized(ctx, actorRef, nil)
 	if err != nil {
 		t.Fatalf("ensureRevertedFinalized: %v", err)
 	}
@@ -696,7 +696,7 @@ func TestRevertActor_LostLeaseKeepsNewAssignment(t *testing.T) {
 	if err := w.ensureWorkerDiscarded(ctx, actorRef, stale, nil); err != nil {
 		t.Fatalf("ensureWorkerDiscarded: %v", err)
 	}
-	if _, err := w.ensureRevertedFinalized(ctx, actorRef); apierror.Code(err) != codes.FailedPrecondition {
+	if _, err := w.ensureRevertedFinalized(ctx, actorRef, nil); apierror.Code(err) != codes.FailedPrecondition {
 		t.Fatalf("ensureRevertedFinalized = %v, want FailedPrecondition", err)
 	}
 	wantWorker := wireTestAssignment().GetWorker().GetName()

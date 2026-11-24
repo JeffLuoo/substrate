@@ -79,6 +79,14 @@ func (w *ActorWorkflow) ResumeActor(ctx context.Context, actorRef resources.Acto
 	if err != nil {
 		return nil, false, err
 	}
+	// A held actor never resumes. One still awake (its suspend failed or is
+	// still running) gets a suspend in the background.
+	if holds := actor.GetStatus().GetHolds(); len(holds) > 0 {
+		if state := actor.GetStatus().GetState(); state == ateapi.ActorState_ACTOR_STATE_RUNNING || state == ateapi.ActorState_ACTOR_STATE_RESUMING {
+			w.enforceHoldAsync(ctx, actorRef)
+		}
+		return nil, false, actorHeldError(actorRef, holds)
+	}
 	if wasRunning = actor.GetStatus().GetState() == ateapi.ActorState_ACTOR_STATE_RUNNING; wasRunning {
 		return actor, false, nil
 	}
@@ -92,6 +100,9 @@ func (w *ActorWorkflow) ResumeActor(ctx context.Context, actorRef resources.Acto
 	actor, actorTemplate, err = w.loadActorForResume(leaseCtx, actorRef)
 	if err != nil {
 		return nil, false, err
+	}
+	if holds := actor.GetStatus().GetHolds(); len(holds) > 0 {
+		return nil, false, actorHeldError(actorRef, holds)
 	}
 	if wasRunning = actor.GetStatus().GetState() == ateapi.ActorState_ACTOR_STATE_RUNNING; wasRunning {
 		return actor, false, nil
@@ -206,7 +217,7 @@ func (w *ActorWorkflow) ensureVolumesCreated(ctx context.Context, actorRef resou
 		return nil, apierror.FailedPrecondition("cannot create volumes for Actor %s in state %s", actorRef, st)
 	}
 
-	volumes, createErr := createActorVolumes(ctx, w.pluginRegistry, w.storageClassLister, actor.GetMetadata().GetUid(), actorTemplate, actor.GetStatus().GetExternalVolumes().GetVolumes())
+	volumes, createErr := createActorVolumesForActor(ctx, w.pluginRegistry, w.storageClassLister, actor, actorTemplate, actor.GetStatus().GetExternalVolumes().GetVolumes(), w.labelActorVolumes)
 	// createActorVolumes reports the state it got to even when it fails, so both
 	// paths persist the same field.
 	updatePrecondition := store.PreconditionFrom(actor)
@@ -418,6 +429,12 @@ func (w *ActorWorkflow) assignWorkerAttempt(ctx context.Context, actorRef resour
 		}
 	}()
 
+	// The RESUMING commit below is guarded on this actor's version, so a
+	// hold added after this check fails that commit and the retry sees it.
+	if holds := actor.GetStatus().GetHolds(); len(holds) > 0 && actor.GetStatus().GetState() == ateapi.ActorState_ACTOR_STATE_SUSPENDED {
+		return nil, nil, actorHeldError(actorRef, holds)
+	}
+
 	constraints := schedulingConstraints(actor, actorTemplate)
 	snapRuntime := constraints.SnapshotRuntime
 	class = constraints.SandboxClass
@@ -480,6 +497,9 @@ func (w *ActorWorkflow) assignWorkerAttempt(ctx context.Context, actorRef resour
 	// assignment behind.
 	storedActor, err := w.store.BindActorToWorker(ctx, assignedWorker.GetMetadata().GetName(), assignment, admit, actorRef, store.PreconditionFrom(actor), func(toUpdate *ateapi.Actor) error {
 		newAssignment := workerAssignmentFrom(bound, snapRuntime)
+		// BindActorToWorker stamps assignment.Metadata.CreateTime before calling
+		// mutate, so ActivationStartTime matches ate.actor.epoch at close.
+		newAssignment.ActivationStartTime = proto.CloneOf(assignment.GetMetadata().GetCreateTime())
 		toUpdate.Status.State = ateapi.ActorState_ACTOR_STATE_RESUMING
 		toUpdate.Status.WorkerAssignment = newAssignment
 		toUpdate.Status.AssignedNode = newAssignment.GetNodeName()
@@ -541,6 +561,9 @@ func workerAssignmentFrom(w *ateapi.Worker, snapRuntime hardware.Requirement) *a
 		WorkerPodIps:    slices.Clone(w.GetStatus().GetIps()),
 		NodeName:        w.GetNodeName(),
 		WorkerSpiffeId:  w.GetWorkerSpiffeId(),
+		// Copied so a closing record can price one slot without fetching the
+		// Worker, which may already be gone.
+		WorkerCapacityActors: w.GetStatus().GetCapacity().GetActors(),
 		// The runtime the actor is started or restored under. Snapshots taken
 		// during this assignment are stamped with it, so a worker that later
 		// changes its default does not relabel state captured on the old one.

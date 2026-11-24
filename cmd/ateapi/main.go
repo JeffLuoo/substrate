@@ -107,6 +107,13 @@ var (
 	ateletClientCredBundle = pflag.String("atelet-client-cred-bundle", "", "Credential bundle presented as the client certificate when dialing atelet.")
 	ateletServiceAccount   = pflag.String("atelet-service-account", installdefaults.AteletServiceAccount, "ServiceAccount atelet runs as. It is the service-account segment of the SPIFFE ID expected on atelet's certificate, so it has to match what the deployment actually creates; a deployment that prefixes resource names needs it set.")
 
+	lifecycleEventsOTLPEndpoint         = pflag.String("lifecycle-events-otlp-endpoint", "", "Optional OTLP/gRPC endpoint (host:port or https://host[:port]) to export actor lifecycle events (ate.actor.state_changed, ate.actor.crashed, ate.actor.volume_provisioned, ate.actor.volume_deleted, ate.actor.labels_changed, and ate.actor.hold_changed) over mTLS. Empty disables the extra exporter.")
+	lifecycleEventsOTLPCAFile           = pflag.String("lifecycle-events-otlp-ca-file", "", "PEM trust bundle used to verify the server certificate of --lifecycle-events-otlp-endpoint.")
+	lifecycleEventsOTLPClientCredBundle = pflag.String("lifecycle-events-otlp-client-cred-bundle", "", "Credential bundle presented as the client certificate when dialing --lifecycle-events-otlp-endpoint. Defaults to --atelet-client-cred-bundle when unset.")
+	lifecycleEventsOTLPServerName       = pflag.String("lifecycle-events-otlp-server-name", "", "Optional TLS server name override when dialing --lifecycle-events-otlp-endpoint. Defaults to the endpoint host.")
+	actorPrefixOwners                   = pflag.String("actor-prefix-owners", "", "Comma-separated <prefix>=<principal> pairs restricting actor label keys and hold names under <prefix>/ to the listed principals (for example agent-cost=spiffe://<trust-domain>/ns/ate-cost/sa/ate-cost). A prefix may repeat. Unlisted prefixes stay open to any authorized caller.")
+	csiVolumeActorLabels                = pflag.Bool("csi-volume-actor-labels", false, "Append sanitized ate_atespace and ate_actor_uid labels to CSI CreateVolume parameters[\"labels\"] (for CSI drivers such as pd.csi.storage.gke.io that apply volume labels to disks).")
+
 	drainDelay   = pflag.Duration("drain-delay", 13*time.Second, "How long to keep accepting new work after SIGTERM, before starting the gRPC drain.")
 	drainTimeout = pflag.Duration("drain-timeout", 15*time.Second, "Deadline for the graceful gRPC drain on shutdown. In-flight RPCs still running past it are forcefully cancelled.")
 
@@ -202,13 +209,14 @@ func main() {
 	go serverboot.StartMetricsServer(ctx, *metricsListenAddr)
 
 	lp, err := serverboot.InitLogging(ctx, serverboot.LoggingOptions{
-		ServiceName: "ateapi",
-		Exporter:    serverboot.ResolveLogsExporter(ctx),
+		ServiceName:   "ateapi",
+		Exporter:      serverboot.ResolveLogsExporter(ctx),
+		LifecycleOTLP: buildLifecycleOTLPOptions(),
 	})
 	if err != nil {
 		serverboot.Fatal(ctx, "Failed to initialize logging", err)
 	}
-	// Nil when the exporter does not include otlp.
+	// Nil when neither the default OTLP exporter nor the lifecycle OTLP exporter is enabled.
 	if lp != nil {
 		defer serverboot.ShutdownProvider("LoggerProvider", lp.Shutdown)
 	}
@@ -357,6 +365,12 @@ func main() {
 		actorIDJWTAuthorityPool,
 		*snapshotLocation,
 	)
+	controlSrv.SetLabelActorVolumes(*csiVolumeActorLabels)
+	prefixOwners, err := controlapi.ParsePrefixOwners(*actorPrefixOwners)
+	if err != nil {
+		serverboot.Fatal(ctx, "while parsing --actor-prefix-owners", err)
+	}
+	controlSrv.SetPrefixOwners(prefixOwners)
 
 	// Drive stored ActorTemplates through the golden actor flow.
 	templateReconciler := controlapi.NewActorTemplateReconciler(persistence, controlSrv, *templateResyncInterval)
@@ -463,11 +477,33 @@ func loadFlagsFromEnv() error {
 		{postgresOwnerRole, "ATE_API_POSTGRES_OWNER_ROLE"},
 		{postgresSchema, "ATE_API_POSTGRES_SCHEMA"},
 		{actorJWTIssuer, "ATE_API_ACTOR_JWT_ISSUER"},
+		{lifecycleEventsOTLPEndpoint, "ATE_API_LIFECYCLE_EVENTS_OTLP_ENDPOINT"},
+		{lifecycleEventsOTLPCAFile, "ATE_API_LIFECYCLE_EVENTS_OTLP_CA_FILE"},
+		{lifecycleEventsOTLPClientCredBundle, "ATE_API_LIFECYCLE_EVENTS_OTLP_CLIENT_CRED_BUNDLE"},
+		{lifecycleEventsOTLPServerName, "ATE_API_LIFECYCLE_EVENTS_OTLP_SERVER_NAME"},
 		{snapshotLocation, "ATE_API_SNAPSHOT_LOCATION"},
 	}
 	for _, o := range overrides {
 		if *o.flag == "@env" {
 			*o.flag = os.Getenv(o.env)
+		}
+	}
+	envFallbacks := []struct {
+		flagName string
+		flag     *string
+		env      string
+	}{
+		{"lifecycle-events-otlp-endpoint", lifecycleEventsOTLPEndpoint, "ATE_API_LIFECYCLE_EVENTS_OTLP_ENDPOINT"},
+		{"lifecycle-events-otlp-ca-file", lifecycleEventsOTLPCAFile, "ATE_API_LIFECYCLE_EVENTS_OTLP_CA_FILE"},
+		{"lifecycle-events-otlp-client-cred-bundle", lifecycleEventsOTLPClientCredBundle, "ATE_API_LIFECYCLE_EVENTS_OTLP_CLIENT_CRED_BUNDLE"},
+		{"lifecycle-events-otlp-server-name", lifecycleEventsOTLPServerName, "ATE_API_LIFECYCLE_EVENTS_OTLP_SERVER_NAME"},
+		{"actor-prefix-owners", actorPrefixOwners, "ATE_API_ACTOR_PREFIX_OWNERS"},
+	}
+	for _, fb := range envFallbacks {
+		if !pflag.CommandLine.Changed(fb.flagName) && *fb.flag == "" {
+			if v, ok := os.LookupEnv(fb.env); ok && v != "" {
+				*fb.flag = v
+			}
 		}
 	}
 	if !pflag.CommandLine.Changed("postgres-pool-max-conns") {
@@ -477,6 +513,15 @@ func loadFlagsFromEnv() error {
 				return fmt.Errorf("ATE_API_POSTGRES_POOL_MAX_CONNS must be a positive integer")
 			}
 			*postgresPoolMaxConns = int32(value)
+		}
+	}
+	if !pflag.CommandLine.Changed("csi-volume-actor-labels") {
+		if raw, ok := os.LookupEnv("ATE_API_CSI_VOLUME_ACTOR_LABELS"); ok && raw != "" {
+			value, err := strconv.ParseBool(raw)
+			if err != nil {
+				return fmt.Errorf("ATE_API_CSI_VOLUME_ACTOR_LABELS must be a boolean")
+			}
+			*csiVolumeActorLabels = value
 		}
 	}
 	return nil
@@ -512,11 +557,30 @@ func logFlagValues(ctx context.Context) {
 		slog.String("actor-id-ca-pool", *actorIDCAPoolFile),
 		slog.String("pod-identity-ca-certs", *podIdentityCACerts),
 		slog.String("atelet-client-cred-bundle", *ateletClientCredBundle),
+		slog.String("lifecycle-events-otlp-endpoint", *lifecycleEventsOTLPEndpoint),
+		slog.String("lifecycle-events-otlp-ca-file", *lifecycleEventsOTLPCAFile),
+		slog.String("lifecycle-events-otlp-client-cred-bundle", *lifecycleEventsOTLPClientCredBundle),
+		slog.String("lifecycle-events-otlp-server-name", *lifecycleEventsOTLPServerName),
+		slog.Bool("csi-volume-actor-labels", *csiVolumeActorLabels),
+		slog.String("actor-prefix-owners", *actorPrefixOwners),
 		slog.Duration("drain-delay", *drainDelay),
 		slog.Duration("drain-timeout", *drainTimeout),
 		slog.String("snapshot-location", *snapshotLocation),
 		slog.Any("preview", *previewFlags),
 	)
+}
+
+func buildLifecycleOTLPOptions() serverboot.LifecycleOTLPOptions {
+	clientCredBundle := *lifecycleEventsOTLPClientCredBundle
+	if clientCredBundle == "" {
+		clientCredBundle = *ateletClientCredBundle
+	}
+	return serverboot.LifecycleOTLPOptions{
+		Endpoint:         *lifecycleEventsOTLPEndpoint,
+		CAFile:           *lifecycleEventsOTLPCAFile,
+		ClientCredBundle: clientCredBundle,
+		ServerName:       *lifecycleEventsOTLPServerName,
+	}
 }
 
 // postgresConnectionAttr describes the connection string for the startup log

@@ -106,7 +106,7 @@ func (w *ActorWorkflow) RevertActor(ctx context.Context, actorRef resources.Acto
 	// them here, as suspend and crash.go do.
 	finalAttrs = lifecycleOpAttrs(actor, "", "")
 	var finalized *ateapi.Actor
-	if finalized, err = w.ensureRevertedFinalized(leaseCtx, actorRef); err != nil {
+	if finalized, err = w.ensureRevertedFinalized(leaseCtx, actorRef, actorTemplate); err != nil {
 		return nil, err
 	}
 	return finalized, nil
@@ -249,7 +249,7 @@ func (w *ActorWorkflow) ensureInProgressSnapshotDiscarded(ctx context.Context, a
 // releases the external snapshots the update dropped.
 // It re-reads the actor first so an out-of-band transition is not overwritten,
 // and so the version precondition guards what was actually observed.
-func (w *ActorWorkflow) ensureRevertedFinalized(ctx context.Context, actorRef resources.ActorRef) (_ *ateapi.Actor, err error) {
+func (w *ActorWorkflow) ensureRevertedFinalized(ctx context.Context, actorRef resources.ActorRef, actorTemplate *ateapi.ActorTemplate) (_ *ateapi.Actor, err error) {
 	ctx, done := stepSpan(ctx, "FinalizeReverted")
 	defer func() { err = done(err) }()
 
@@ -260,6 +260,13 @@ func (w *ActorWorkflow) ensureRevertedFinalized(ctx context.Context, actorRef re
 	if got := latestActor.GetStatus().GetState(); got != ateapi.ActorState_ACTOR_STATE_REVERTING {
 		return nil, apierror.FailedPrecondition("FinalizeReverted prerequisite not met for Actor: %s (got: %v, want %s)", actorRef, got, ateapi.ActorState_ACTOR_STATE_REVERTING)
 	}
+
+	workerAssignment := latestActor.GetStatus().GetWorkerAssignment()
+	actorAssignment, err := readActorAssignment(ctx, w.store, latestActor)
+	if err != nil {
+		return nil, err
+	}
+	closeAttrs := activationCloseAttrs(workerAssignment, actorAssignment, actorTemplate)
 
 	storedActor, err := w.store.UpdateActorAndRelease(ctx, actorRef, store.PreconditionFrom(latestActor), func(toUpdate *ateapi.Actor) error {
 		toUpdate.Status.State = ateapi.ActorState_ACTOR_STATE_SUSPENDED
@@ -278,7 +285,7 @@ func (w *ActorWorkflow) ensureRevertedFinalized(ctx context.Context, actorRef re
 	if err != nil {
 		return nil, actorWriteError(actorRef, err)
 	}
-	logActorStateChanged(ctx, storedActor, ateattr.OperationRevert)
+	logActorStateChanged(ctx, storedActor, ateattr.OperationRevert, closeAttrs...)
 	w.releaseDroppedSnapshots(ctx, latestActor, storedActor)
 	return storedActor, nil
 }

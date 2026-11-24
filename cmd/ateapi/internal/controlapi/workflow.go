@@ -82,22 +82,71 @@ func markSkipped(ctx context.Context, reason string) {
 //
 // Crashes go through logActorCrashed instead, so read the state off
 // ate.actor.state rather than off the message.
-func logActorStateChanged(ctx context.Context, actor *ateapi.Actor, opName string) {
-	logActorState(ctx, actor, opName, ateattr.ActorStateValue(actor.GetStatus().GetState()))
+func logActorStateChanged(ctx context.Context, actor *ateapi.Actor, opName string, extra ...slog.Attr) {
+	logActorState(ctx, actor, opName, ateattr.ActorStateValue(actor.GetStatus().GetState()), extra...)
 }
 
 // logActorDeleted records the terminal transition. The row is gone, so there is
 // no committed state left to read and this is the one state named by hand.
-func logActorDeleted(ctx context.Context, actor *ateapi.Actor, opName string) {
-	logActorState(ctx, actor, opName, ateattr.ActorStateDeleted)
+func logActorDeleted(ctx context.Context, actor *ateapi.Actor, opName string, extra ...slog.Attr) {
+	logActorState(ctx, actor, opName, ateattr.ActorStateDeleted, extra...)
 }
 
-func logActorState(ctx context.Context, actor *ateapi.Actor, opName, state string) {
+func logActorState(ctx context.Context, actor *ateapi.Actor, opName, state string, extra ...slog.Attr) {
 	attrs := ateattr.ActorLogAttrs(resources.ActorAttributionFromActor(actor))
 	attrs = append(attrs,
 		slog.String(string(ateattr.ActorOperationNameKey), ateattr.NormalizeOperationName(opName)),
 		slog.String(string(ateattr.ActorStateKey), state))
+	attrs = append(attrs, extra...)
+	attrs = appendActorLabels(attrs, actor)
 	actorevent.Log(ctx, actorevent.StateChanged, attrs)
+}
+
+// appendActorLabels adds ate.actor.labels when the actor has labels.
+func appendActorLabels(attrs []slog.Attr, actor *ateapi.Actor) []slog.Attr {
+	if len(actor.GetLabels()) == 0 {
+		return attrs
+	}
+	return append(attrs, slog.String(string(ateattr.ActorLabelsKey), ateattr.ActorLabelsValue(actor.GetLabels())))
+}
+
+// activationCloseAttrs builds the conditional attributes for a closing
+// lifecycle record (suspended, reverted, deleted, or crashed) that releases an
+// active worker assignment: the activation start time (epoch), the booked CPU
+// and memory reservations, and the worker pool identity and actor slot
+// capacity. Returns nil when the transition did not release a worker
+// assignment.
+func activationCloseAttrs(workerAssignment *ateapi.WorkerAssignment, actorAssignment *ateapi.ActorAssignment, tmpl *ateapi.ActorTemplate) []slog.Attr {
+	if workerAssignment == nil && actorAssignment == nil {
+		return nil
+	}
+	var attrs []slog.Attr
+	ct := actorAssignment.GetMetadata().GetCreateTime()
+	if ct == nil {
+		ct = workerAssignment.GetActivationStartTime()
+	}
+	if ct != nil && ct.IsValid() && !ct.AsTime().IsZero() {
+		attrs = append(attrs, slog.Int64(string(ateattr.ActorEpochKey), ct.AsTime().UnixNano()))
+	}
+	res := actorAssignment.GetResources()
+	if res.GetCpuMillicores() == 0 && res.GetMemoryBytes() == 0 {
+		res = tmpl.GetResources().GetLimits()
+	}
+	if cpu := res.GetCpuMillicores(); cpu > 0 {
+		attrs = append(attrs, slog.Float64(string(ateattr.ActorBookedCPUKey), float64(cpu)/1000))
+	}
+	if mem := res.GetMemoryBytes(); mem > 0 {
+		attrs = append(attrs, slog.Int64(string(ateattr.ActorBookedMemoryKey), mem))
+	}
+	if ns, pool := workerAssignment.GetWorkerNamespace(), workerAssignment.GetWorkerPool(); ns != "" && pool != "" {
+		attrs = append(attrs,
+			slog.String(string(ateattr.WorkerPoolNamespaceKey), ns),
+			slog.String(string(ateattr.WorkerPoolNameKey), pool))
+	}
+	if slots := workerAssignment.GetWorkerCapacityActors(); slots > 0 {
+		attrs = append(attrs, slog.Int64(string(ateattr.WorkerPoolCapacityActorsKey), int64(slots)))
+	}
+	return attrs
 }
 
 // ActorWorkflow handles the workflows for actor's resume / suspend operations.
@@ -116,6 +165,10 @@ type ActorWorkflow struct {
 	pluginRegistry          VolumePluginRegistry
 	objectStorePlugin       objectstore.ControlProviderClient
 	clusterSnapshotLocation string
+	labelActorVolumes       bool
+	// holdEnforcing holds the keys of actors with a background suspend
+	// under way for a hold, so a router retry storm starts at most one.
+	holdEnforcing sync.Map
 }
 
 // NewActorWorkflow creates a new ActorWorkflow. instruments may be nil.
@@ -228,6 +281,7 @@ type workerWorkflowStore interface {
 	MarkWorkerForDeletion(ctx context.Context, name string, precondition store.DeletePreconditions, mutate func(toUpdate *ateapi.Worker) error) (*ateapi.Worker, error)
 	DeleteWorker(ctx context.Context, name string, precondition store.DeletePreconditions) (*ateapi.Worker, error)
 	ListWorkerAssignments(ctx context.Context, workerName string, opts store.ListOptions) (store.ListResponse[*ateapi.ActorAssignment], error)
+	GetWorkerAssignment(ctx context.Context, workerName, actorUID string) (*ateapi.ActorAssignment, error)
 	UpdateActorAndRelease(ctx context.Context, actorRef resources.ActorRef, precondition store.Precondition, mutate func(toUpdate *ateapi.Actor) error) (*ateapi.Actor, error)
 	GetActor(ctx context.Context, actorRef resources.ActorRef) (*ateapi.Actor, error)
 	UpdateActor(ctx context.Context, actorRef resources.ActorRef, precondition store.Precondition, mutate func(toUpdate *ateapi.Actor) error) (*ateapi.Actor, error)

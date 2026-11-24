@@ -16,7 +16,11 @@ package controlapi
 
 import (
 	"context"
+	"log/slog"
+	"maps"
+	"strconv"
 	"testing"
+	"time"
 
 	"go.ate.dev/substrate/api/ateapi/v1"
 	"go.ate.dev/substrate/cmd/ateapi/internal/store"
@@ -26,6 +30,7 @@ import (
 	"go.ate.dev/substrate/internal/ateattr"
 	"go.ate.dev/substrate/internal/resources"
 	"google.golang.org/grpc/codes"
+	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
 // TestActorStateChangeRecords drives each transition that commits a new state
@@ -45,6 +50,7 @@ func TestActorStateChangeRecords(t *testing.T) {
 		transition func(t *testing.T, w *ActorWorkflow, ref resources.ActorRef, actor *ateapi.Actor, tmpl *ateapi.ActorTemplate)
 		wantOp     string
 		wantState  string
+		wantExtra  map[string]string
 		wantStored ateapi.ActorState
 	}{
 		{
@@ -82,8 +88,12 @@ func TestActorStateChangeRecords(t *testing.T) {
 					t.Fatalf("SuspendActor: %v", err)
 				}
 			},
-			wantOp:     ateattr.OperationSuspend,
-			wantState:  ateattr.ActorStateSuspended,
+			wantOp:    ateattr.OperationSuspend,
+			wantState: ateattr.ActorStateSuspended,
+			wantExtra: map[string]string{
+				string(ateattr.WorkerPoolNamespaceKey): "worker-ns",
+				string(ateattr.WorkerPoolNameKey):      "pool",
+			},
 			wantStored: ateapi.ActorState_ACTOR_STATE_SUSPENDED,
 		},
 		{
@@ -154,6 +164,7 @@ func TestActorStateChangeRecords(t *testing.T) {
 				string(ateattr.ActorOperationNameKey): tt.wantOp,
 				string(ateattr.ActorStateKey):         tt.wantState,
 			}
+			maps.Copy(want, tt.wantExtra)
 			for k, wv := range want {
 				if got[k] != wv {
 					t.Errorf("%s = %q, want %q", k, got[k], wv)
@@ -312,5 +323,216 @@ func TestActorStateChangeRecordSkippedOnConflict(t *testing.T) {
 	}
 	if len(*records) != 0 {
 		t.Errorf("got %d state records from a losing writer, want 0: %v", len(*records), *records)
+	}
+}
+
+// TestClosingLifecycleRecordsCarryActivationFields verifies that closing
+// lifecycle records (suspend, revert, delete, crash, and worker-delete crash)
+// carry ate.actor.epoch, ate.actor.booked.cpu, ate.actor.booked.memory,
+// ate.workerpool.namespace, and ate.workerpool.name from the released worker
+// assignment.
+func TestClosingLifecycleRecordsCarryActivationFields(t *testing.T) {
+	const (
+		tmplAtespace = "ns"
+		tmplName     = "tmpl1"
+		workerName   = "worker-1"
+		poolNS       = "worker-ns"
+		poolName     = "pool"
+	)
+
+	seedBoundActor := func(t *testing.T, ctx context.Context, st store.Interface, state ateapi.ActorState, extraOpts ...func(*ateapi.Actor)) (*ateapi.Actor, *ateapi.ActorTemplate, *ateapi.Worker, *ateapi.ActorAssignment) {
+		t.Helper()
+		storetest.MustCreateAtespace(t, ctx, st, tmplAtespace)
+		tmpl, err := st.CreateActorTemplate(ctx, &ateapi.ActorTemplate{
+			Metadata:       &ateapi.ResourceMetadata{Atespace: tmplAtespace, Name: tmplName},
+			SnapshotConfig: &ateapi.SnapshotConfig{StorageLocation: testStorageLocation},
+			Resources: &ateapi.ResourceRequirements{
+				Limits: &ateapi.Resources{CpuMillicores: 250, MemoryBytes: 512 << 20},
+			},
+		})
+		if err != nil {
+			t.Fatalf("CreateActorTemplate: %v", err)
+		}
+
+		worker, err := st.CreateWorker(ctx, &ateapi.Worker{
+			Metadata:        &ateapi.ResourceMetadata{Name: workerName},
+			WorkerNamespace: poolNS,
+			WorkerPool:      poolName,
+			WorkerPod:       "pod-1",
+			WorkerPodUid:    "pod-uid-1",
+			NodeName:        "node-1",
+			Status:          &ateapi.WorkerStatus{},
+		})
+		if err != nil {
+			t.Fatalf("CreateWorker: %v", err)
+		}
+
+		actorRef := resources.ActorRef{Atespace: "team-a", Name: "id1"}
+		opts := append([]func(*ateapi.Actor){
+			func(a *ateapi.Actor) {
+				a.Status.AssignedNode = "node-1"
+				a.Status.WorkerAssignment = wireTestAssignment()
+				a.Status.WorkerAssignment.WorkerCapacityActors = 8
+			},
+		}, extraOpts...)
+		seedWorkflowActor(t, ctx, st, actorRef, tmplAtespace, tmplName, state, opts...)
+		actor, err := st.GetActor(ctx, actorRef)
+		if err != nil {
+			t.Fatalf("GetActor: %v", err)
+		}
+
+		seedAssignment(t, st, workerName, &ateapi.ActorAssignment{
+			Actor:     &ateapi.ObjectRef{Atespace: actorRef.Atespace, Name: actorRef.Name},
+			ActorUid:  actor.GetMetadata().GetUid(),
+			Resources: &ateapi.Resources{CpuMillicores: 250, MemoryBytes: 512 << 20},
+		})
+		assignment, err := st.GetWorkerAssignment(ctx, workerName, actor.GetMetadata().GetUid())
+		if err != nil {
+			t.Fatalf("GetWorkerAssignment: %v", err)
+		}
+		return actor, tmpl, worker, assignment
+	}
+
+	assertActivationAttrs := func(t *testing.T, got map[string]string, assignment *ateapi.ActorAssignment) {
+		t.Helper()
+		wantEpoch := strconv.FormatInt(assignment.GetMetadata().GetCreateTime().AsTime().UnixNano(), 10)
+		want := map[string]string{
+			string(ateattr.ActorEpochKey):               wantEpoch,
+			string(ateattr.ActorBookedCPUKey):           "0.25",
+			string(ateattr.ActorBookedMemoryKey):        strconv.FormatInt(512<<20, 10),
+			string(ateattr.WorkerPoolNamespaceKey):      poolNS,
+			string(ateattr.WorkerPoolNameKey):           poolName,
+			string(ateattr.WorkerPoolCapacityActorsKey): "8",
+		}
+		for k, wv := range want {
+			if got[k] != wv {
+				t.Errorf("%s = %q, want %q (all attrs: %v)", k, got[k], wv, got)
+			}
+		}
+	}
+
+	t.Run("suspend finalized", func(t *testing.T) {
+		ctx := context.Background()
+		events := otlpEvents(t)
+		st := newTestPersistence(t)
+		actor, _, _, assignment := seedBoundActor(t, ctx, st, ateapi.ActorState_ACTOR_STATE_SUSPENDING, withPauseInProgress(t))
+		w, _ := newWireCaptureWorkflow(t, st)
+		if _, err := w.SuspendActor(ctx, resources.ActorRefFromActor(actor), suspendAsync); err != nil {
+			t.Fatalf("SuspendActor: %v", err)
+		}
+		gotEvents := events()
+		if len(gotEvents) != 1 {
+			t.Fatalf("got %d events, want 1", len(gotEvents))
+		}
+		assertActivationAttrs(t, gotEvents[0].attrs, assignment)
+	})
+
+	t.Run("revert finalized", func(t *testing.T) {
+		ctx := context.Background()
+		events := otlpEvents(t)
+		st := newTestPersistence(t)
+		actor, _, _, assignment := seedBoundActor(t, ctx, st, ateapi.ActorState_ACTOR_STATE_REVERTING)
+		w, _ := newWireCaptureWorkflow(t, st)
+		if _, err := w.RevertActor(ctx, resources.ActorRefFromActor(actor)); err != nil {
+			t.Fatalf("RevertActor: %v", err)
+		}
+		gotEvents := events()
+		if len(gotEvents) != 1 {
+			t.Fatalf("got %d events, want 1", len(gotEvents))
+		}
+		assertActivationAttrs(t, gotEvents[0].attrs, assignment)
+	})
+
+	t.Run("delete finalized", func(t *testing.T) {
+		ctx := context.Background()
+		events := otlpEvents(t)
+		st := newTestPersistence(t)
+		actor, _, _, assignment := seedBoundActor(t, ctx, st, ateapi.ActorState_ACTOR_STATE_DELETING)
+		if _, err := st.MarkActorForDeletion(ctx, resources.ActorRefFromActor(actor), store.DeletePreconditions{}, nil); err != nil {
+			t.Fatalf("MarkActorForDeletion: %v", err)
+		}
+		w, _ := newWireCaptureWorkflow(t, st)
+		if _, err := w.DeleteActor(ctx, resources.ActorRefFromActor(actor), store.DeletePreconditions{}); err != nil {
+			t.Fatalf("DeleteActor: %v", err)
+		}
+		gotEvents := events()
+		if len(gotEvents) != 1 {
+			t.Fatalf("got %d events, want 1", len(gotEvents))
+		}
+		if gotEvents[0].attrs[string(ateattr.ActorStateKey)] != ateattr.ActorStateDeleted {
+			t.Errorf("state = %q, want %q", gotEvents[0].attrs[string(ateattr.ActorStateKey)], ateattr.ActorStateDeleted)
+		}
+		assertActivationAttrs(t, gotEvents[0].attrs, assignment)
+	})
+
+	t.Run("crashActor", func(t *testing.T) {
+		ctx := context.Background()
+		events := otlpEvents(t)
+		st := newTestPersistence(t)
+		actor, _, _, assignment := seedBoundActor(t, ctx, st, ateapi.ActorState_ACTOR_STATE_RUNNING)
+		if err := crashActor(ctx, st, resources.ActorRefFromActor(actor), ateattr.OperationResume, "boom"); err != nil {
+			t.Fatalf("crashActor: %v", err)
+		}
+		gotEvents := events()
+		if len(gotEvents) != 1 {
+			t.Fatalf("got %d events, want 1", len(gotEvents))
+		}
+		assertEvent(t, gotEvents[0], actorevent.Crashed)
+		assertActivationAttrs(t, gotEvents[0].attrs, assignment)
+	})
+
+	t.Run("worker delete crashBoundActor", func(t *testing.T) {
+		ctx := context.Background()
+		events := otlpEvents(t)
+		st := newTestPersistence(t)
+		_, _, worker, assignment := seedBoundActor(t, ctx, st, ateapi.ActorState_ACTOR_STATE_RUNNING)
+		ww := NewWorkerWorkflow(st, newNodeAteletDialer(t, &capturingTerminator{}))
+		if _, err := ww.DeleteWorker(ctx, worker.GetMetadata().GetName(), store.DeletePreconditions{}); err != nil {
+			t.Fatalf("DeleteWorker: %v", err)
+		}
+		gotEvents := events()
+		if len(gotEvents) != 1 {
+			t.Fatalf("got %d events, want 1", len(gotEvents))
+		}
+		assertEvent(t, gotEvents[0], actorevent.Crashed)
+		assertActivationAttrs(t, gotEvents[0].attrs, assignment)
+	})
+}
+
+// TestActivationCloseAttrsFallbacks covers a closing record whose
+// worker_assignments row is already gone: the epoch comes from the actor's
+// activation_start_time, and capacity is omitted when the Worker reported none.
+func TestActivationCloseAttrsFallbacks(t *testing.T) {
+	start := time.Unix(1_700_000_000, 42).UTC()
+	attrsOf := func(attrs []slog.Attr) map[string]string {
+		got := map[string]string{}
+		for _, a := range attrs {
+			got[a.Key] = a.Value.String()
+		}
+		return got
+	}
+
+	got := attrsOf(activationCloseAttrs(&ateapi.WorkerAssignment{
+		WorkerNamespace:      "worker-ns",
+		WorkerPool:           "pool",
+		ActivationStartTime:  timestamppb.New(start),
+		WorkerCapacityActors: 4,
+	}, nil, nil))
+	want := map[string]string{
+		string(ateattr.ActorEpochKey):               strconv.FormatInt(start.UnixNano(), 10),
+		string(ateattr.WorkerPoolNamespaceKey):      "worker-ns",
+		string(ateattr.WorkerPoolNameKey):           "pool",
+		string(ateattr.WorkerPoolCapacityActorsKey): "4",
+	}
+	if !maps.Equal(got, want) {
+		t.Errorf("attrs = %v, want %v", got, want)
+	}
+
+	got = attrsOf(activationCloseAttrs(&ateapi.WorkerAssignment{WorkerNamespace: "worker-ns", WorkerPool: "pool"}, nil, nil))
+	if _, ok := got[string(ateattr.WorkerPoolCapacityActorsKey)]; ok {
+		t.Errorf("capacity attr present with no reported capacity: %v", got)
+	}
+	if _, ok := got[string(ateattr.ActorEpochKey)]; ok {
+		t.Errorf("epoch attr present with no start time: %v", got)
 	}
 }

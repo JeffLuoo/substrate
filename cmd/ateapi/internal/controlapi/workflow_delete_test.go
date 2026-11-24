@@ -739,7 +739,7 @@ func TestEnsureWorkerReleased_RecreatedActorKeepsAssignment(t *testing.T) {
 	recreated := storetest.MustCreateActor(t, ctx, persistence, bound(""))
 	seedWireWorker(t, ctx, persistence, assignmentOf(recreated))
 
-	if _, err := w.ensureWorkerReleased(ctx, actorRef, deleted); apierror.Code(err) != codes.Aborted {
+	if _, _, _, err := w.ensureWorkerReleased(ctx, actorRef, deleted); apierror.Code(err) != codes.Aborted {
 		t.Fatalf("ensureWorkerReleased = %v, want ABORTED", err)
 	}
 	wantWorker := wireTestAssignment().GetWorker().GetName()

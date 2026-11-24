@@ -71,8 +71,10 @@ func (w *ActorWorkflow) DeleteActor(ctx context.Context, actorRef resources.Acto
 	}
 
 	// Release worker if atelet termination and volume detachment did not fail.
+	var workerAssignment *ateapi.WorkerAssignment
+	var actorAssignment *ateapi.ActorAssignment
 	if atletTerminatedErr == nil && volumesDetachedErr == nil {
-		if actor, err = w.ensureWorkerReleased(ctx, actorRef, actor); err != nil {
+		if actor, workerAssignment, actorAssignment, err = w.ensureWorkerReleased(ctx, actorRef, actor); err != nil {
 			errs = append(errs, fmt.Errorf("while releasing worker: %w", err))
 		}
 	} else {
@@ -82,7 +84,7 @@ func (w *ActorWorkflow) DeleteActor(ctx context.Context, actorRef resources.Acto
 			slog.Any("volumesDetachedErr", volumesDetachedErr))
 	}
 
-	if err := w.ensureVolumesDeleted(ctx, actor); err != nil {
+	if err := w.ensureVolumesDeleted(ctx, actor, actorTemplate); err != nil {
 		errs = append(errs, fmt.Errorf("while deleting volumes: %w", err))
 	}
 
@@ -93,7 +95,8 @@ func (w *ActorWorkflow) DeleteActor(ctx context.Context, actorRef resources.Acto
 	if len(errs) > 0 {
 		return nil, errors.Join(errs...)
 	}
-	return w.finalizeDeleted(ctx, actor)
+	closeAttrs := activationCloseAttrs(workerAssignment, actorAssignment, actorTemplate)
+	return w.finalizeDeleted(ctx, actor, closeAttrs...)
 }
 
 // ensureAteletTerminated calls atelet to terminate the workload for opName.
@@ -215,19 +218,24 @@ func (w *ActorWorkflow) ensureVolumesDetachedForDelete(ctx context.Context, acto
 
 // ensureWorkerReleased releases the worker assigned to the actor. An actor
 // with no worker assignment holds no assignment row either.
-func (w *ActorWorkflow) ensureWorkerReleased(ctx context.Context, actorRef resources.ActorRef, actor *ateapi.Actor) (updated *ateapi.Actor, err error) {
+func (w *ActorWorkflow) ensureWorkerReleased(ctx context.Context, actorRef resources.ActorRef, actor *ateapi.Actor) (updated *ateapi.Actor, workerAssignment *ateapi.WorkerAssignment, actorAssignment *ateapi.ActorAssignment, err error) {
 	ctx, done := stepSpan(ctx, "ReleaseWorker")
 	defer func() { err = done(err) }()
 
 	if actor.GetStatus().GetWorkerAssignment() == nil {
 		markSkipped(ctx, "worker already released")
-		return actor, nil
+		return actor, nil, nil, nil
 	}
 
 	// Read again for the version the earlier steps left.
 	latestActor, err := w.store.GetActor(ctx, actorRef)
 	if err != nil {
-		return nil, err
+		return nil, nil, nil, err
+	}
+	workerAssignment = latestActor.GetStatus().GetWorkerAssignment()
+	actorAssignment, err = readActorAssignment(ctx, w.store, latestActor)
+	if err != nil {
+		return nil, nil, nil, err
 	}
 	// The uid is the deleted Actor's. A delete that lost its lease can re-read
 	// an Actor recreated under the same name, and must not release it.
@@ -239,9 +247,9 @@ func (w *ActorWorkflow) ensureWorkerReleased(ctx context.Context, actorRef resou
 		return nil
 	})
 	if err != nil {
-		return nil, actorWriteError(actorRef, err)
+		return nil, nil, nil, actorWriteError(actorRef, err)
 	}
-	return updatedActor, nil
+	return updatedActor, workerAssignment, actorAssignment, nil
 }
 
 var errAlreadyMarked = errors.New("already marked for deletion")
@@ -284,7 +292,7 @@ func (w *ActorWorkflow) ensureMarkedDeleting(ctx context.Context, actorRef resou
 
 // ensureVolumesDeleted removes the actor's external volumes. Volume deletion
 // is idempotent, so a re-entered workflow can safely run it again. It assumes a no-op success if volume is not found
-func (w *ActorWorkflow) ensureVolumesDeleted(ctx context.Context, actor *ateapi.Actor) (err error) {
+func (w *ActorWorkflow) ensureVolumesDeleted(ctx context.Context, actor *ateapi.Actor, actorTemplate *ateapi.ActorTemplate) (err error) {
 	ctx, done := stepSpan(ctx, "DeleteVolumes")
 	defer func() { err = done(err) }()
 
@@ -298,7 +306,7 @@ func (w *ActorWorkflow) ensureVolumesDeleted(ctx context.Context, actor *ateapi.
 	// disabling the gate while in use would be an orphaned volume
 	// attachment, we are NOT checking the ExternalVolumes gate in the
 	// delete/suspend path.
-	if err := deleteActorVolumes(ctx, w.pluginRegistry, actor.GetMetadata().GetUid(), actor.GetStatus().GetExternalVolumes().GetVolumes()); err != nil {
+	if err := deleteActorVolumesForActor(ctx, w.pluginRegistry, actor, actorTemplate, actor.GetStatus().GetExternalVolumes().GetVolumes()); err != nil {
 		return apierror.Internal("while deleting actor volumes: %v", err)
 	}
 	return nil
@@ -371,7 +379,7 @@ func actorSnapshotStoragePrefix(actor *ateapi.Actor) (resources.StoragePrefix, e
 
 // finalizeDeleted removes the actor from the store and returns the deleted
 // record.
-func (w *ActorWorkflow) finalizeDeleted(ctx context.Context, actor *ateapi.Actor) (_ *ateapi.Actor, err error) {
+func (w *ActorWorkflow) finalizeDeleted(ctx context.Context, actor *ateapi.Actor, closeAttrs ...slog.Attr) (_ *ateapi.Actor, err error) {
 	ctx, done := stepSpan(ctx, "FinalizeDeleted")
 	defer func() { err = done(err) }()
 
@@ -398,6 +406,6 @@ func (w *ActorWorkflow) finalizeDeleted(ctx context.Context, actor *ateapi.Actor
 		}
 		return nil, fmt.Errorf("while deleting actor from DB: %w", err)
 	}
-	logActorDeleted(ctx, deleted, ateattr.OperationDelete)
+	logActorDeleted(ctx, deleted, ateattr.OperationDelete, closeAttrs...)
 	return deleted, nil
 }

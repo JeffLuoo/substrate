@@ -173,7 +173,8 @@ func NewActorResumer(apiClient ateapi.ControlClient, opts ...resumerOption) *Act
 // momentary condition into a bounded wait instead of an immediate failure — a
 // parked request should ride out a blip, not fail on it with budget remaining.
 // FailedPrecondition is not retried: ateapi refuses the resume for the
-// actor's current state, and the router does not wait for that state to change.
+// actor's current state (including held actors with ErrorInfo reason
+// ACTOR_HELD), and the router does not wait for that state to change.
 // All other codes (NotFound, DeadlineExceeded, PermissionDenied, ...) are
 // returned to the caller so the HTTP boundary can map them with full fidelity.
 func (r *ActorResumer) retryable(err error) bool {

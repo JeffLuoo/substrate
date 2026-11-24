@@ -222,7 +222,7 @@ func (w *WorkerWorkflow) releaseBoundActor(ctx context.Context, worker *ateapi.W
 	// there later.
 	w.reclaimActorStateOnNode(ctx, worker, actor)
 
-	return w.crashBoundActor(ctx, worker, actorRef, actor, "Releasing actor from a worker whose pod is gone", crashMessageWorkerPodGone)
+	return w.crashBoundActor(ctx, worker, assignment, actorRef, actor, "Releasing actor from a worker whose pod is gone", crashMessageWorkerPodGone)
 }
 
 // crashBoundActor moves an Actor that lost its sandbox on the Worker to
@@ -231,7 +231,7 @@ func (w *WorkerWorkflow) releaseBoundActor(ctx context.Context, worker *ateapi.W
 // Actor in ACTOR_STATE_DELETING only has its worker assignment cleared with the
 // release.
 // A concurrent write to the Actor fails this as ABORTED.
-func (w *WorkerWorkflow) crashBoundActor(ctx context.Context, worker *ateapi.Worker, actorRef resources.ActorRef, actor *ateapi.Actor, logMsg, crashMsg string) error {
+func (w *WorkerWorkflow) crashBoundActor(ctx context.Context, worker *ateapi.Worker, assignment *ateapi.ActorAssignment, actorRef resources.ActorRef, actor *ateapi.Actor, logMsg, crashMsg string) error {
 	name := worker.GetMetadata().GetName()
 	// DELETING is final. A CRASHED actor can be reverted and resumed, and the
 	// delete may already have collected its volumes and snapshots. Its
@@ -257,6 +257,7 @@ func (w *WorkerWorkflow) crashBoundActor(ctx context.Context, worker *ateapi.Wor
 	// Snapshot crash attributes before pod and pool pointers are cleared on actor.
 	sandboxClass := actor.GetStatus().GetWorkerAssignment().GetSandboxRuntime().GetSandboxClass()
 	crashAttrs := ateattr.ActorMetricAttributes(actor, sandboxClass, opName)
+	closeAttrs := activationCloseAttrs(actor.GetStatus().GetWorkerAssignment(), assignment, nil)
 
 	slog.LogAttrs(ctx, slog.LevelInfo, logMsg,
 		append(ateattr.ActorLogAttrs(resources.ActorAttributionFromActor(actor)),
@@ -271,7 +272,7 @@ func (w *WorkerWorkflow) crashBoundActor(ctx context.Context, worker *ateapi.Wor
 		return releaseWriteError(name, err)
 	}
 
-	logActorCrashed(ctx, actor, opName)
+	logActorCrashed(ctx, actor, opName, closeAttrs...)
 	recordActorCrash(ctx, crashAttrs)
 	return nil
 }

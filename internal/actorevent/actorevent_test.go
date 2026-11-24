@@ -90,6 +90,26 @@ func usagePendingAttrs() []slog.Attr {
 		slog.Int64(string(ateattr.ActorEpochKey), 1_699_999_990_000_000_000))
 }
 
+func volumeProvisionedAttrs() []slog.Attr {
+	return append(ateattr.ActorLogAttrs(testAttribution()),
+		slog.String(string(ateattr.VolumeNameKey), "workspace"),
+		slog.String(string(ateattr.VolumeCSINameKey), "substrate-"+testActorUID+"-workspace"),
+		slog.String(string(ateattr.VolumeStorageIDKey), "projects/p/zones/z/disks/substrate-"+testActorUID+"-workspace"),
+		slog.String(string(ateattr.VolumeStorageClassKey), "standard-rwo"),
+		slog.String(string(ateattr.VolumeDriverKey), "pd.csi.storage.gke.io"),
+		slog.Int64(string(ateattr.VolumeCapacityBytesKey), 10<<30))
+}
+
+func volumeDeletedAttrs() []slog.Attr {
+	return append(ateattr.ActorLogAttrs(testAttribution()),
+		slog.String(string(ateattr.VolumeNameKey), "workspace"),
+		slog.String(string(ateattr.VolumeCSINameKey), "substrate-"+testActorUID+"-workspace"),
+		slog.String(string(ateattr.VolumeStorageIDKey), "projects/p/zones/z/disks/substrate-"+testActorUID+"-workspace"),
+		slog.String(string(ateattr.VolumeDriverKey), "pd.csi.storage.gke.io"),
+		slog.String(string(ateattr.VolumeStorageClassKey), "standard-rwo"),
+		slog.Int64(string(ateattr.VolumeCapacityBytesKey), 10<<30))
+}
+
 func recordAttrs(rec log.Record) map[string]string {
 	got := make(map[string]string, rec.AttributesLen())
 	rec.WalkAttributes(func(kv attribute.KeyValue) bool {
@@ -126,6 +146,29 @@ func TestBuildRecord(t *testing.T) {
 				string(ateattr.ActorStateKey):         ateattr.ActorStateRunning,
 				string(ateattr.ActorOperationNameKey): ateattr.OperationResume,
 				string(ateattr.ActorUIDKey):           testActorUID,
+			},
+			wantAbsent: StateChanged.Conditional,
+		},
+		{
+			name:  "closing state changed carries activation attributes",
+			event: StateChanged,
+			attrs: append(stateChangedAttrs(ateattr.ActorStateSuspended),
+				slog.Int64(string(ateattr.ActorEpochKey), 1_699_999_990_000_000_000),
+				slog.Float64(string(ateattr.ActorBookedCPUKey), 0.25),
+				slog.Int64(string(ateattr.ActorBookedMemoryKey), 512<<20),
+				slog.String(string(ateattr.WorkerPoolNamespaceKey), "ate-system"),
+				slog.String(string(ateattr.WorkerPoolNameKey), "default"),
+			),
+			wantName: "ate.actor.state_changed",
+			wantBody: "Actor state changed",
+			wantSev:  log.SeverityInfo,
+			wantVals: map[string]string{
+				string(ateattr.ActorStateKey):          ateattr.ActorStateSuspended,
+				string(ateattr.ActorEpochKey):          "1699999990000000000",
+				string(ateattr.ActorBookedCPUKey):      "0.25",
+				string(ateattr.ActorBookedMemoryKey):   "536870912",
+				string(ateattr.WorkerPoolNamespaceKey): "ate-system",
+				string(ateattr.WorkerPoolNameKey):      "default",
 			},
 		},
 		{
@@ -175,6 +218,36 @@ func TestBuildRecord(t *testing.T) {
 				string(ateattr.StatsSourceKey): ateattr.StatsSourceUnspecified,
 			},
 			wantAbsent: UsageSampled.Conditional,
+		},
+		{
+			name:     "volume provisioned",
+			event:    VolumeProvisioned,
+			attrs:    volumeProvisionedAttrs(),
+			wantName: "ate.actor.volume_provisioned",
+			wantBody: "Actor volume provisioned",
+			wantSev:  log.SeverityInfo,
+			wantVals: map[string]string{
+				string(ateattr.VolumeNameKey):          "workspace",
+				string(ateattr.VolumeCSINameKey):       "substrate-" + testActorUID + "-workspace",
+				string(ateattr.VolumeStorageClassKey):  "standard-rwo",
+				string(ateattr.VolumeDriverKey):        "pd.csi.storage.gke.io",
+				string(ateattr.VolumeCapacityBytesKey): "10737418240",
+			},
+		},
+		{
+			name:     "volume deleted with template attributes",
+			event:    VolumeDeleted,
+			attrs:    volumeDeletedAttrs(),
+			wantName: "ate.actor.volume_deleted",
+			wantBody: "Actor volume deleted",
+			wantSev:  log.SeverityInfo,
+			wantVals: map[string]string{
+				string(ateattr.VolumeNameKey):          "workspace",
+				string(ateattr.VolumeCSINameKey):       "substrate-" + testActorUID + "-workspace",
+				string(ateattr.VolumeStorageClassKey):  "standard-rwo",
+				string(ateattr.VolumeDriverKey):        "pd.csi.storage.gke.io",
+				string(ateattr.VolumeCapacityBytesKey): "10737418240",
+			},
 		},
 	}
 
@@ -495,5 +568,28 @@ func TestSetConsoleWritesBoth(t *testing.T) {
 	}
 	if !stdout.records[0].Time.Equal(exp.records[0].Timestamp()) {
 		t.Errorf("timestamps differ: stdout %v, OTLP %v", stdout.records[0].Time, exp.records[0].Timestamp())
+	}
+}
+
+func TestIsLifecycleEvent(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name string
+		want bool
+	}{
+		{StateChanged.Name, true},
+		{Crashed.Name, true},
+		{VolumeProvisioned.Name, true},
+		{VolumeDeleted.Name, true},
+		{LabelsChanged.Name, true},
+		{HoldChanged.Name, true},
+		{UsageSampled.Name, false},
+		{"", false},
+		{"ate.actor.other", false},
+	} {
+		if got := IsLifecycleEvent(tc.name); got != tc.want {
+			t.Errorf("IsLifecycleEvent(%q) = %v, want %v", tc.name, got, tc.want)
+		}
 	}
 }

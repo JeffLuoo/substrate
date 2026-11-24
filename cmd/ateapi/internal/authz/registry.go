@@ -247,6 +247,15 @@ var defaultRPCPermissions = map[string]rpcRule{
 	ateapi.Control_SuspendActor_FullMethodName: rule(checksOf(func(r *ateapi.SuspendActorRequest) ([]check, field.ErrorList) {
 		return onActor(RelationCanSuspend, r.GetActor(), field.NewPath("actor"))
 	})),
+	ateapi.Control_SetActorLabels_FullMethodName: rule(checksOf(func(r *ateapi.SetActorLabelsRequest) ([]check, field.ErrorList) {
+		return onActor(RelationCanSetLabels, r.GetActor(), field.NewPath("actor"))
+	})),
+	ateapi.Control_AddActorHold_FullMethodName: rule(checksOf(func(r *ateapi.AddActorHoldRequest) ([]check, field.ErrorList) {
+		return onActor(RelationCanManageHolds, r.GetActor(), field.NewPath("actor"))
+	})),
+	ateapi.Control_RemoveActorHold_FullMethodName: rule(checksOf(func(r *ateapi.RemoveActorHoldRequest) ([]check, field.ErrorList) {
+		return onActor(RelationCanManageHolds, r.GetActor(), field.NewPath("actor"))
+	})),
 	ateapi.Control_RevertActor_FullMethodName: rule(checksOf(func(r *ateapi.RevertActorRequest) ([]check, field.ErrorList) {
 		return onActor(RelationCanRevert, r.GetActor(), field.NewPath("actor"))
 	})),

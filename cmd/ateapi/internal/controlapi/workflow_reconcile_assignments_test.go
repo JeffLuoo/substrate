@@ -460,4 +460,18 @@ func TestAssignWorkerAttempt_LeavesWorkerEpochUnset(t *testing.T) {
 	if got := stored.GetStatus().GetWorkerAssignment().GetWorkerEpoch(); got != 0 {
 		t.Errorf("actor worker_epoch = %d, want 0 until the Actor is RUNNING", got)
 	}
+	assignment, err := persistence.GetWorkerAssignment(ctx, name, actor.GetMetadata().GetUid())
+	if err != nil {
+		t.Fatalf("GetWorkerAssignment: %v", err)
+	}
+	// Get/ListActors report the activation start and slot capacity that the
+	// closing record later carries as ate.actor.epoch and
+	// ate.workerpool.capacity.actors.
+	wa := stored.GetStatus().GetWorkerAssignment()
+	if got, want := wa.GetActivationStartTime().AsTime(), assignment.GetMetadata().GetCreateTime().AsTime(); !got.Equal(want) || got.IsZero() {
+		t.Errorf("actor activation_start_time = %v, want assignment create time %v", got, want)
+	}
+	if got := wa.GetWorkerCapacityActors(); got != 1 {
+		t.Errorf("actor worker_capacity_actors = %d, want 1", got)
+	}
 }
