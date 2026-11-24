@@ -307,6 +307,295 @@ func TestPatchAtenetEgressManifest(t *testing.T) {
 	}
 }
 
+// meterAndGateFilters is a filters file in the shape the option is for: a
+// gate that can extend Envoy's wait while it holds a request, then a meter
+// that streams response bodies without delaying them. Both receive the actor
+// identity. The gate can mutate, so it disallows system headers; the meter
+// is in observability mode, so Envoy applies none of its mutations.
+const meterAndGateFilters = `- name: envoy.filters.http.ext_proc
+  typed_config:
+    "@type": type.googleapis.com/envoy.extensions.filters.http.ext_proc.v3.ExternalProcessor
+    grpc_service:
+      envoy_grpc:
+        cluster_name: additional_egress_ext_proc
+    failure_mode_allow: true
+    message_timeout: 2s
+    max_message_timeout: 120s
+    request_attributes:
+    - filter_state['dev.ate.actor.identity']
+    forward_rules:
+      disallowed_headers:
+        patterns:
+        - exact: authorization
+        - exact: x-api-key
+    processing_mode:
+      request_header_mode: SEND
+      response_header_mode: SEND
+      request_body_mode: NONE
+      response_body_mode: NONE
+    mutation_rules:
+      disallow_system: true
+- name: envoy.filters.http.ext_proc
+  typed_config:
+    "@type": type.googleapis.com/envoy.extensions.filters.http.ext_proc.v3.ExternalProcessor
+    grpc_service:
+      envoy_grpc:
+        cluster_name: additional_egress_ext_proc
+    observability_mode: true
+    request_attributes:
+    - filter_state['dev.ate.actor.identity']
+    processing_mode:
+      request_header_mode: SEND
+      response_header_mode: SEND
+      request_body_mode: NONE
+      response_body_mode: STREAMED
+`
+
+// hostMatcher is a match_delegate matcher that skips the wrapped filter for
+// every host other than one LLM provider.
+var hostMatcher = map[string]any{"matcher_list": map[string]any{"matchers": []any{map[string]any{
+	"predicate": map[string]any{"not_matcher": map[string]any{"single_predicate": map[string]any{
+		"input": map[string]any{"name": "authority", "typed_config": map[string]any{
+			"@type": "type.googleapis.com/envoy.type.matcher.v3.HttpRequestHeaderMatchInput", "header_name": ":authority"}},
+		"value_match": map[string]any{"safe_regex": map[string]any{"google_re2": map[string]any{}, "regex": `^api\.openai\.com(:[0-9]+)?$`}},
+	}}},
+	"on_match": map[string]any{"action": map[string]any{"name": "skip", "typed_config": map[string]any{
+		"@type": "type.googleapis.com/envoy.extensions.filters.common.matcher.action.v3.SkipFilter"}}},
+}}}}
+
+// wrapInMatchDelegate returns the filters file with each filter wrapped in a
+// match_delegate that has hostMatcher.
+func wrapInMatchDelegate(t *testing.T, content string) string {
+	t.Helper()
+	var filters []map[string]any
+	if err := yaml.UnmarshalStrict([]byte(content), &filters); err != nil {
+		t.Fatal(err)
+	}
+	wrapped := make([]map[string]any, len(filters))
+	for i, f := range filters {
+		wrapped[i] = map[string]any{"name": matchDelegateFilterName, "typed_config": map[string]any{
+			"@type": extensionWithMatcherType, "xds_matcher": hostMatcher, "extension_config": f,
+		}}
+	}
+	out, err := yaml.Marshal(wrapped)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(out)
+}
+
+// extProcTypedConfig returns an ext_proc filter's typed_config, directly or
+// inside a match_delegate.
+func extProcTypedConfig(f map[string]any) map[string]any {
+	if f["name"] == matchDelegateFilterName {
+		if inner, err := matchDelegateExtension(f); err == nil {
+			f = inner
+		}
+	}
+	tc, _ := f["typed_config"].(map[string]any)
+	return tc
+}
+
+// writeFiltersFile writes a filters file into a fresh directory.
+func writeFiltersFile(t *testing.T, content string) string {
+	t.Helper()
+	path := t.TempDir() + "/filters.yaml"
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatalf("writing filters file: %v", err)
+	}
+	return path
+}
+
+// A filters file replaces the default filter on both HTTP chains, in order
+// and below the policy ext_proc, and leaves the single cluster in place. The
+// filters may sit in match_delegates.
+func TestPatchAtenetEgressManifestWithFiltersFile(t *testing.T) {
+	for _, tc := range []struct{ name, content string }{
+		{"ext_proc", meterAndGateFilters},
+		{"match_delegate", wrapInMatchDelegate(t, meterAndGateFilters)},
+	} {
+		t.Run(tc.name, func(t *testing.T) { testPatchWithFiltersFile(t, tc.content) })
+	}
+}
+
+func testPatchWithFiltersFile(t *testing.T, content string) {
+	root, err := config.RepoRoot()
+	if err != nil {
+		t.Fatalf("resolving repo root: %v", err)
+	}
+	env := &Env{Cfg: &config.Config{
+		Root:                               root,
+		AdditionalEgressExtprocService:     "ate-cost/cost:9002",
+		AdditionalEgressExtprocFiltersFile: writeFiltersFile(t, content),
+	}}
+
+	patched, err := env.patchAtenetEgressManifest()
+	if err != nil {
+		t.Fatalf("patchAtenetEgressManifest failed: %v", err)
+	}
+	var envoyYaml string
+	for _, doc := range strings.Split(string(patched), "\n---\n") {
+		var obj struct {
+			Kind string            `json:"kind"`
+			Data map[string]string `json:"data"`
+		}
+		if err := yaml.Unmarshal([]byte(doc), &obj); err != nil {
+			t.Fatalf("patched manifest document is not valid YAML: %v", err)
+		}
+		if obj.Kind == "ConfigMap" {
+			envoyYaml = obj.Data["envoy.yaml"]
+			break
+		}
+	}
+	if envoyYaml == "" {
+		t.Fatal("no envoy.yaml found in the patched manifest")
+	}
+	if got := strings.Count(envoyYaml, "- name: "+additionalEgressExtprocCluster); got != 1 {
+		t.Errorf("additional ext_proc cluster defined %d times, want 1", got)
+	}
+
+	spliced := 0
+	for _, filters := range httpFilterChains(t, envoyYaml) {
+		policyAt := -1
+		var additional []map[string]any
+		for i, f := range filters {
+			switch extProcCluster(f) {
+			case "ext_proc_server":
+				policyAt = i
+			case additionalEgressExtprocCluster:
+				if policyAt < 0 {
+					t.Errorf("additional ext_proc at http_filters[%d] runs before the policy ext_proc", i)
+				}
+				additional = append(additional, f)
+			}
+		}
+		if len(additional) == 0 {
+			continue
+		}
+		spliced++
+		if len(additional) != 2 {
+			t.Fatalf("chain carries %d additional ext_proc filters, want the file's 2", len(additional))
+		}
+		gate, meter := extProcTypedConfig(additional[0]), extProcTypedConfig(additional[1])
+		if gate["max_message_timeout"] != "120s" {
+			t.Errorf("first filter max_message_timeout = %v, want the gate's 120s", gate["max_message_timeout"])
+		}
+		if meter["observability_mode"] != true {
+			t.Errorf("second filter observability_mode = %v, want the meter's true", meter["observability_mode"])
+		}
+	}
+	if spliced != 2 {
+		t.Errorf("filters spliced into %d HTTP chains, want 2", spliced)
+	}
+}
+
+func TestLoadAdditionalEgressExtprocFiltersRejects(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		content string
+		wantIn  string
+	}{
+		{"not a list", "name: envoy.filters.http.ext_proc\n", "want a YAML list"},
+		{"empty list", "[]\n", "the list is empty"},
+		{"another filter", "- name: envoy.filters.http.router\n", `filter 1 is "envoy.filters.http.router"`},
+		{
+			"another type",
+			"- name: envoy.filters.http.ext_proc\n  typed_config:\n    \"@type\": type.googleapis.com/envoy.extensions.filters.http.ext_authz.v3.ExtAuthz\n",
+			"want " + extProcFilterType,
+		},
+		{
+			"another cluster",
+			strings.Replace(meterAndGateFilters, "cluster_name: additional_egress_ext_proc", "cluster_name: ext_proc_server", 1),
+			`filter 1 dials "ext_proc_server"`,
+		},
+		{
+			"google_grpc",
+			"- name: envoy.filters.http.ext_proc\n  typed_config:\n    \"@type\": " + extProcFilterType + "\n    grpc_service:\n      google_grpc:\n        target_uri: cost.example.com:443\n",
+			`filter 1 dials ""`,
+		},
+		{"duplicate key", meterAndGateFilters + "  name: twice\n", "want a YAML list"},
+		{
+			"match_delegate of another type",
+			strings.Replace(wrapInMatchDelegate(t, meterAndGateFilters), extensionWithMatcherType, "type.googleapis.com/envoy.extensions.filters.http.composite.v3.Composite", 1),
+			"want " + extensionWithMatcherType,
+		},
+		{
+			"match_delegate without extension_config",
+			"- name: envoy.filters.http.match_delegate\n  typed_config:\n    \"@type\": " + extensionWithMatcherType + "\n    xds_matcher: {}\n",
+			"has no extension_config",
+		},
+		{
+			"match_delegate without matcher",
+			"- name: envoy.filters.http.match_delegate\n  typed_config:\n    \"@type\": " + extensionWithMatcherType + "\n    extension_config:\n      name: envoy.filters.http.ext_proc\n",
+			"has no xds_matcher",
+		},
+		{
+			"match_delegate with another field",
+			strings.Replace(wrapInMatchDelegate(t, meterAndGateFilters), "xds_matcher:", "matcher: {}\n    xds_matcher:", 1),
+			`typed_config field "matcher"`,
+		},
+		{
+			"match_delegate around another filter",
+			strings.Replace(wrapInMatchDelegate(t, meterAndGateFilters), "name: envoy.filters.http.ext_proc", "name: envoy.filters.http.ext_authz", 1),
+			`filter 1 is "envoy.filters.http.ext_authz"`,
+		},
+		{
+			"match_delegate around another cluster",
+			strings.Replace(wrapInMatchDelegate(t, meterAndGateFilters), "cluster_name: additional_egress_ext_proc", "cluster_name: ext_proc_server", 1),
+			`filter 1 dials "ext_proc_server"`,
+		},
+		{
+			"gate without mutation_rules",
+			strings.Replace(meterAndGateFilters, "    mutation_rules:\n      disallow_system: true\n", "", 1),
+			"filter 1 can mutate requests but does not set mutation_rules.disallow_system: true",
+		},
+		{
+			"gate with disallow_system false",
+			strings.Replace(meterAndGateFilters, "disallow_system: true", "disallow_system: false", 1),
+			"filter 1 can mutate requests but does not set mutation_rules.disallow_system: true",
+		},
+		{
+			"observability_mode false without mutation_rules",
+			strings.Replace(meterAndGateFilters, "observability_mode: true", "observability_mode: false", 1),
+			"filter 2 can mutate requests but does not set mutation_rules.disallow_system: true",
+		},
+		{
+			"gate without the identity attribute",
+			strings.Replace(meterAndGateFilters, "    request_attributes:\n    - filter_state['dev.ate.actor.identity']\n", "", 1),
+			"filter 1 does not request the attribute filter_state['dev.ate.actor.identity']",
+		},
+		{
+			"meter with other attributes only",
+			strings.Replace(meterAndGateFilters, "    observability_mode: true\n    request_attributes:\n    - filter_state['dev.ate.actor.identity']\n", "    observability_mode: true\n    request_attributes:\n    - request.host\n", 1),
+			"filter 2 does not request the attribute filter_state['dev.ate.actor.identity']",
+		},
+		{
+			"match_delegate around a gate without mutation_rules",
+			wrapInMatchDelegate(t, strings.Replace(meterAndGateFilters, "    mutation_rules:\n      disallow_system: true\n", "", 1)),
+			"filter 1 can mutate requests",
+		},
+		{
+			"match_delegate in a match_delegate",
+			wrapInMatchDelegate(t, wrapInMatchDelegate(t, meterAndGateFilters)),
+			`filter 1 is "envoy.filters.http.match_delegate"`,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := loadAdditionalEgressExtprocFilters(writeFiltersFile(t, tc.content))
+			if err == nil {
+				t.Fatal("loadAdditionalEgressExtprocFilters() = nil error, want one")
+			}
+			if !strings.Contains(err.Error(), tc.wantIn) {
+				t.Errorf("error %q does not contain %q", err, tc.wantIn)
+			}
+		})
+	}
+
+	if _, err := loadAdditionalEgressExtprocFilters(t.TempDir() + "/missing.yaml"); err == nil {
+		t.Error("loadAdditionalEgressExtprocFilters(missing file) = nil error, want one")
+	}
+}
+
 // httpFilterChains returns the http_filters of every HTTP connection manager
 // in the bootstrap's static listeners.
 func httpFilterChains(t *testing.T, envoyYaml string) [][]map[string]any {
@@ -339,19 +628,6 @@ func httpFilterChains(t *testing.T, envoyYaml string) [][]map[string]any {
 		}
 	}
 	return chains
-}
-
-// extProcCluster returns the cluster an ext_proc filter dials, or "" for any
-// other filter.
-func extProcCluster(filter map[string]any) string {
-	if filter["name"] != "envoy.filters.http.ext_proc" {
-		return ""
-	}
-	typedConfig, _ := filter["typed_config"].(map[string]any)
-	grpcService, _ := typedConfig["grpc_service"].(map[string]any)
-	envoyGRPC, _ := grpcService["envoy_grpc"].(map[string]any)
-	name, _ := envoyGRPC["cluster_name"].(string)
-	return name
 }
 
 // The plain GKE install renders the base kustomization, not the raw
@@ -1355,6 +1631,106 @@ func TestPatchAgentgatewayCredentialProviderRequiresOneMarker(t *testing.T) {
 	for _, raw := range []string{"", "#ATE_AGENTGATEWAY_CREDENTIAL_PROVIDERS\n#ATE_AGENTGATEWAY_CREDENTIAL_PROVIDERS\n"} {
 		if _, err := patchAgentgatewayEgressInject([]byte(raw), nil); err == nil {
 			t.Errorf("accepted a manifest without exactly one marker: %q", raw)
+		}
+	}
+}
+
+func TestRenderAgentgatewayAdditionalExtprocService(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		service string
+	}{
+		{name: "disabled"},
+		{name: "enabled", service: "ate-cost/cost:9002"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			src := images.Source{Repo: "example.com/substrate", Tag: "v1.2.3"}
+			e := &Env{
+				Cfg: &config.Config{
+					Root:                           repoRoot(t),
+					Router:                         config.RouterAgentgateway,
+					Images:                         src,
+					AdditionalEgressExtprocService: tc.service,
+				},
+				resolver: images.NewPrebuilt(src, func(context.Context, string) (string, error) {
+					return "sha256:" + strings.Repeat("2", 64), nil
+				}),
+			}
+			built, err := e.renderAtenetEgressManifest(t.Context(), nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if strings.Contains(string(built), "#ATE_AGENTGATEWAY_EXTPROC") {
+				t.Fatal("unresolved agentgateway extproc marker")
+			}
+			found := false
+			for _, doc := range strings.Split(string(built), "\n---\n") {
+				var cm corev1.ConfigMap
+				if err := yaml.Unmarshal([]byte(doc), &cm); err != nil || cm.Name != "atenet-egress-agentgateway-substrate-config" {
+					continue
+				}
+				found = true
+				resolved, err := yaml.YAMLToJSON([]byte(cm.Data["config.yaml"]))
+				if err != nil {
+					t.Fatal(err)
+				}
+				gateway, err := kyaml.Parse(string(resolved))
+				if err != nil {
+					t.Fatal(err)
+				}
+				for _, protocol := range []string{"HTTP", "HTTPS"} {
+					routes, err := gateway.Pipe(kyaml.Lookup("binds", "[mode=internal]", "listeners", "[protocol="+protocol+"]", "routes"))
+					if err != nil || routes == nil {
+						t.Fatalf("%s routes missing: %v", protocol, err)
+					}
+					var extProcNode *kyaml.RNode
+					for _, route := range routes.YNode().Content {
+						candidate, err := kyaml.NewRNode(route).Pipe(kyaml.Lookup("policies", "extProc"))
+						if err == nil && candidate != nil {
+							extProcNode = candidate
+							break
+						}
+					}
+					if tc.service == "" {
+						if extProcNode != nil {
+							t.Errorf("%s unexpectedly has extProc policy", protocol)
+						}
+						continue
+					}
+					if extProcNode == nil {
+						t.Fatalf("%s extProc policy missing", protocol)
+					}
+					var got map[string]any
+					if err := extProcNode.YNode().Decode(&got); err != nil {
+						t.Fatal(err)
+					}
+					if got["host"] != "cost.ate-cost.svc.cluster.local:9002" {
+						t.Errorf("%s extProc host = %v, want cost.ate-cost.svc.cluster.local:9002", protocol, got["host"])
+					}
+					if got["failureMode"] != "failClosed" {
+						t.Errorf("%s extProc failureMode = %v, want failClosed", protocol, got["failureMode"])
+					}
+					reqAttrs, _ := got["requestAttributes"].(map[string]any)
+					wantAttrs := map[string]any{
+						"source.spiffeId":    "source.spiffeId",
+						"source.certificate": "source.certificate",
+					}
+					if !reflect.DeepEqual(reqAttrs, wantAttrs) {
+						t.Errorf("%s extProc requestAttributes = %v, want %v", protocol, reqAttrs, wantAttrs)
+					}
+				}
+			}
+			if !found {
+				t.Fatal("agentgateway egress ConfigMap is missing")
+			}
+		})
+	}
+}
+
+func TestPatchAgentgatewayExtprocRequiresTwoMarkers(t *testing.T) {
+	for _, raw := range []string{"", "#ATE_AGENTGATEWAY_EXTPROC\n", "#ATE_AGENTGATEWAY_EXTPROC\n#ATE_AGENTGATEWAY_EXTPROC\n#ATE_AGENTGATEWAY_EXTPROC\n"} {
+		if _, err := patchAgentgatewayEgressExtproc([]byte(raw), "ate-cost/cost:9002"); err == nil {
+			t.Errorf("accepted a manifest without exactly two markers: %q", raw)
 		}
 	}
 }

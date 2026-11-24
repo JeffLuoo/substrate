@@ -21,9 +21,12 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
+
+	"sigs.k8s.io/yaml"
 
 	"go.ate.dev/substrate/cmd/ate-setup/internal/config"
 	"go.ate.dev/substrate/cmd/ate-setup/internal/images"
@@ -232,12 +235,6 @@ func (e *Env) renderAtenetEgressManifest(ctx context.Context, providers []config
 	general := e.Cfg.AdditionalEgressExtprocService != ""
 
 	if e.Cfg.Router == config.RouterAgentgateway {
-		// Rejected during configuration loading, which names the channel the
-		// value came from. This guards the invariant for a caller that built
-		// a Config directly; an operator never sees it.
-		if general {
-			return nil, fmt.Errorf("internal: additional ext_proc filter reached rendering with dataplane %s", config.RouterAgentgateway)
-		}
 		raw, err := e.render(e.Cfg.Path(installDir + "/agentgateway-egress"))
 		if err != nil {
 			return nil, err
@@ -247,6 +244,10 @@ func (e *Env) renderAtenetEgressManifest(ctx context.Context, providers []config
 			return nil, err
 		}
 		raw, err = patchAgentgatewayEgressInject(raw, providers)
+		if err != nil {
+			return nil, err
+		}
+		raw, err = patchAgentgatewayEgressExtproc(raw, e.Cfg.AdditionalEgressExtprocService)
 		if err != nil {
 			return nil, err
 		}
@@ -389,7 +390,54 @@ func patchAgentgatewayEgressInject(raw []byte, providers []config.CredentialProv
 	return replaceManifestMarker(raw, "#ATE_AGENTGATEWAY_CREDENTIAL_PROVIDERS", block)
 }
 
+// patchAgentgatewayEgressExtproc splices an extProc policy onto the HTTP and
+// HTTPS egress routes when an additional ext_proc service is configured,
+// forwarding both source.spiffeId and source.certificate so the processor can
+// verify the actor's UID from the ActorIdentity X.509 extension.
+func patchAgentgatewayEgressExtproc(raw []byte, serviceSpec string) ([]byte, error) {
+	var block string
+	if serviceSpec != "" {
+		parts := strings.Split(serviceSpec, "/")
+		if len(parts) != 2 {
+			return nil, fmt.Errorf("invalid additional ext_proc service %q: expected <namespace>/<service>:<port>", serviceSpec)
+		}
+		namespace := parts[0]
+		svcPort := strings.Split(parts[1], ":")
+		if len(svcPort) != 2 {
+			return nil, fmt.Errorf("invalid additional ext_proc service %q: expected <namespace>/<service>:<port>", serviceSpec)
+		}
+		service := svcPort[0]
+		port := svcPort[1]
+		address := fmt.Sprintf("%s.%s.svc.cluster.local:%s", service, namespace, port)
+		serverName := fmt.Sprintf("%s.%s.svc", service, namespace)
+		block = fmt.Sprintf(`extProc:
+  host: %q
+  policies:
+    backendTLS:
+      hostname: %q
+      cert: /run/podidentity.podcert.ate.dev/credential-bundle.pem
+      key: /run/podidentity.podcert.ate.dev/credential-bundle.pem
+      root: /run/servicedns-ca/trust-bundle.pem
+  failureMode: failClosed
+  processingOptions:
+    requestHeaderMode: send
+    responseHeaderMode: skip
+    requestBodyMode: none
+    responseBodyMode: none
+    requestTrailerMode: skip
+    responseTrailerMode: skip
+  requestAttributes:
+    source.spiffeId: source.spiffeId
+    source.certificate: source.certificate`, address, serverName)
+	}
+	return replaceManifestMarkers(raw, "#ATE_AGENTGATEWAY_EXTPROC", block, 2)
+}
+
 func replaceManifestMarker(raw []byte, marker, block string) ([]byte, error) {
+	return replaceManifestMarkers(raw, marker, block, 1)
+}
+
+func replaceManifestMarkers(raw []byte, marker, block string, want int) ([]byte, error) {
 	var out []string
 	replaced := 0
 	for _, line := range strings.Split(string(raw), "\n") {
@@ -405,8 +453,8 @@ func replaceManifestMarker(raw []byte, marker, block string) ([]byte, error) {
 		}
 		out = append(out, line)
 	}
-	if replaced != 1 {
-		return nil, fmt.Errorf("expected 1 %s marker, found %d", marker, replaced)
+	if replaced != want {
+		return nil, fmt.Errorf("expected %d %s marker, found %d", want, marker, replaced)
 	}
 	return []byte(strings.Join(out, "\n")), nil
 }
@@ -442,6 +490,12 @@ func (e *Env) patchAtenetEgressManifest() ([]byte, error) {
 	serverName := fmt.Sprintf("%s.%s.svc", service, namespace)
 
 	filterBlock := emitAdditionalEgressExtprocFilter()
+	if path := e.Cfg.AdditionalEgressExtprocFiltersFile; path != "" {
+		filterBlock, err = loadAdditionalEgressExtprocFilters(path)
+		if err != nil {
+			return nil, err
+		}
+	}
 	clusterBlock := emitAdditionalEgressExtprocCluster(address, port, serverName)
 
 	lines := strings.Split(string(raw), "\n")
@@ -488,6 +542,147 @@ func (e *Env) patchAtenetEgressManifest() ([]byte, error) {
 
 const additionalEgressExtprocCluster = "additional_egress_ext_proc"
 
+// actorIdentityAttribute is the request attribute that names the actor. Every
+// additional ext_proc filter must request it, so that the processor never
+// has to identify the actor from headers that the sandbox can set.
+const actorIdentityAttribute = "filter_state['dev.ate.actor.identity']"
+
+// extProcFilterType is the typed_config of an ext_proc HTTP filter.
+const extProcFilterType = "type.googleapis.com/envoy.extensions.filters.http.ext_proc.v3.ExternalProcessor"
+
+const (
+	extProcFilterName = "envoy.filters.http.ext_proc"
+	// matchDelegateFilterName wraps one HTTP filter with a matcher that can
+	// skip it per request.
+	matchDelegateFilterName = "envoy.filters.http.match_delegate"
+	// extensionWithMatcherType is the typed_config of a match_delegate.
+	extensionWithMatcherType = "type.googleapis.com/envoy.extensions.common.matching.v3.ExtensionWithMatcher"
+)
+
+// loadAdditionalEgressExtprocFilters reads the filters an operator splices in
+// place of emitAdditionalEgressExtprocFilter: for example a synchronous filter
+// that may hold a request on its headers, followed by an observability-mode
+// filter that streams response bodies. It returns them as a YAML list for the
+// filter markers.
+//
+// Each filter must be an ext_proc filter that dials the
+// additional_egress_ext_proc cluster and requests the actor identity
+// attribute, or a match_delegate that wraps exactly one such filter. A filter
+// that is not in observability mode must also set
+// mutation_rules.disallow_system: true. A match_delegate lets its matcher
+// skip the processor for requests it does not need (for example every host
+// other than the LLM providers). The file configures what the additional
+// processor sees and how long Envoy waits for it; it cannot add other filters
+// to the egress chains or point them at another cluster.
+func loadAdditionalEgressExtprocFilters(path string) (string, error) {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return "", fmt.Errorf("reading additional ext_proc filters: %w", err)
+	}
+	var filters []map[string]any
+	if err := yaml.UnmarshalStrict(raw, &filters); err != nil {
+		return "", fmt.Errorf("additional ext_proc filters in %s: want a YAML list of filters: %w", path, err)
+	}
+	if len(filters) == 0 {
+		return "", fmt.Errorf("additional ext_proc filters in %s: the list is empty", path)
+	}
+	for i, f := range filters {
+		if name, _ := f["name"].(string); name == matchDelegateFilterName {
+			inner, err := matchDelegateExtension(f)
+			if err != nil {
+				return "", fmt.Errorf("additional ext_proc filters in %s: filter %d: %w", path, i+1, err)
+			}
+			f = inner
+		}
+		if name, _ := f["name"].(string); name != extProcFilterName {
+			return "", fmt.Errorf("additional ext_proc filters in %s: filter %d is %q, want %s or a %s that wraps one", path, i+1, name, extProcFilterName, matchDelegateFilterName)
+		}
+		typedConfig, _ := f["typed_config"].(map[string]any)
+		if got, _ := typedConfig["@type"].(string); got != extProcFilterType {
+			return "", fmt.Errorf("additional ext_proc filters in %s: filter %d has typed_config @type %q, want %s", path, i+1, got, extProcFilterType)
+		}
+		if got := extProcCluster(f); got != additionalEgressExtprocCluster {
+			return "", fmt.Errorf("additional ext_proc filters in %s: filter %d dials %q, want grpc_service.envoy_grpc.cluster_name %s",
+				path, i+1, got, additionalEgressExtprocCluster)
+		}
+		if !slices.Contains(stringList(typedConfig["request_attributes"]), actorIdentityAttribute) {
+			return "", fmt.Errorf("additional ext_proc filters in %s: filter %d does not request the attribute %s",
+				path, i+1, actorIdentityAttribute)
+		}
+		// Envoy applies no mutation from a filter in observability mode. Any
+		// other filter must not change system headers such as :authority,
+		// which select the upstream and the credential that is injected.
+		mutationRules, _ := typedConfig["mutation_rules"].(map[string]any)
+		if typedConfig["observability_mode"] != true && mutationRules["disallow_system"] != true {
+			return "", fmt.Errorf("additional ext_proc filters in %s: filter %d can mutate requests but does not set mutation_rules.disallow_system: true",
+				path, i+1)
+		}
+	}
+	out, err := yaml.Marshal(filters)
+	if err != nil {
+		return "", fmt.Errorf("additional ext_proc filters in %s: %w", path, err)
+	}
+	return strings.TrimRight(string(out), "\n"), nil
+}
+
+// stringList returns the strings of a YAML list, or nil.
+func stringList(v any) []string {
+	items, _ := v.([]any)
+	var out []string
+	for _, item := range items {
+		if s, ok := item.(string); ok {
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
+// matchDelegateExtension returns the one filter a match_delegate wraps. Its
+// typed_config may hold only the wrapped filter (extension_config) and the
+// matcher (xds_matcher); Envoy lets that matcher do nothing but skip the
+// wrapped filter.
+func matchDelegateExtension(filter map[string]any) (map[string]any, error) {
+	typedConfig, _ := filter["typed_config"].(map[string]any)
+	if got, _ := typedConfig["@type"].(string); got != extensionWithMatcherType {
+		return nil, fmt.Errorf("%s has typed_config @type %q, want %s", matchDelegateFilterName, got, extensionWithMatcherType)
+	}
+	for key := range typedConfig {
+		switch key {
+		case "@type", "extension_config", "xds_matcher":
+		default:
+			return nil, fmt.Errorf("%s has typed_config field %q; only extension_config and xds_matcher are allowed", matchDelegateFilterName, key)
+		}
+	}
+	if _, ok := typedConfig["xds_matcher"].(map[string]any); !ok {
+		return nil, fmt.Errorf("%s has no xds_matcher", matchDelegateFilterName)
+	}
+	inner, ok := typedConfig["extension_config"].(map[string]any)
+	if !ok {
+		return nil, fmt.Errorf("%s has no extension_config", matchDelegateFilterName)
+	}
+	return inner, nil
+}
+
+// extProcCluster returns the cluster an ext_proc filter dials, directly or
+// inside a match_delegate, or "" for any other filter.
+func extProcCluster(filter map[string]any) string {
+	if filter["name"] == matchDelegateFilterName {
+		inner, err := matchDelegateExtension(filter)
+		if err != nil {
+			return ""
+		}
+		filter = inner
+	}
+	if filter["name"] != extProcFilterName {
+		return ""
+	}
+	typedConfig, _ := filter["typed_config"].(map[string]any)
+	grpcService, _ := typedConfig["grpc_service"].(map[string]any)
+	envoyGRPC, _ := grpcService["envoy_grpc"].(map[string]any)
+	name, _ := envoyGRPC["cluster_name"].(string)
+	return name
+}
+
 func emitAdditionalEgressExtprocFilter() string {
 	return `- name: envoy.filters.http.ext_proc
   typed_config:
@@ -500,6 +695,8 @@ func emitAdditionalEgressExtprocFilter() string {
     message_timeout: 2s
     request_attributes:
     - filter_state['dev.ate.actor.identity']
+    - filter_state['dev.ate.actor.uid']
+    - filter_state['dev.ate.actor.template']
     processing_mode:
       request_header_mode: SEND
       response_header_mode: SKIP

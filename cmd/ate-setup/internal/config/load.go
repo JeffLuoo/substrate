@@ -262,25 +262,26 @@ func buildConfig(root string, env map[string]string, r *Resolved) (*Config, erro
 			IAMAuth:     r.String("ateapi.postgres.cloudsql.iamAuth"),
 			IPType:      r.String("ateapi.postgres.cloudsql.ipType"),
 		},
-		RolloutTimeout:                 rolloutTimeout,
-		rolloutTimeoutSet:              r.Supplied("rolloutTimeout"),
-		PodcertWorkersPerSigner:        podcertWorkers,
-		EnvoyConcurrency:               envoyConcurrency,
-		ClusterSize:                    r.String("clusterSize"),
-		CordonSystemInfraComponents:    r.Bool("cordonSystemInfraComponents"),
-		FakeDataPlane:                  r.Bool("fakeDataPlane.enabled"),
-		E2ETuning:                      r.Bool("e2e.tuning"),
-		IngressAllowedSPIFFEIDs:        splitList(r.String("ingressAllowedSPIFFEIDs")),
-		AdditionalEgressExtprocService: r.String("atenet.egress.additionalExtprocService"),
-		CredentialProviderJSON:         r.String("atenet.egress.credentialProvider"),
-		AnthropicAPIKey:                r.String("demo.anthropicAPIKey"),
-		OtlpEndpoint:                   r.String("otlpEndpoint"),
-		APILogLevel:                    r.String("ateapi.logLevel"),
-		BenchmarkActorMemory:           r.String("benchmark.actorMemory"),
-		PreviewGates:                   splitList(r.String("preview")),
-		kubeconfigEnv:                  kubeconfigEnv,
-		shellEnv:                       env,
-		resolved:                       r,
+		RolloutTimeout:                     rolloutTimeout,
+		rolloutTimeoutSet:                  r.Supplied("rolloutTimeout"),
+		PodcertWorkersPerSigner:            podcertWorkers,
+		EnvoyConcurrency:                   envoyConcurrency,
+		ClusterSize:                        r.String("clusterSize"),
+		CordonSystemInfraComponents:        r.Bool("cordonSystemInfraComponents"),
+		FakeDataPlane:                      r.Bool("fakeDataPlane.enabled"),
+		E2ETuning:                          r.Bool("e2e.tuning"),
+		IngressAllowedSPIFFEIDs:            splitList(r.String("ingressAllowedSPIFFEIDs")),
+		AdditionalEgressExtprocService:     r.String("atenet.egress.additionalExtprocService"),
+		AdditionalEgressExtprocFiltersFile: r.String("atenet.egress.additionalExtprocFiltersFile"),
+		CredentialProviderJSON:             r.String("atenet.egress.credentialProvider"),
+		AnthropicAPIKey:                    r.String("demo.anthropicAPIKey"),
+		OtlpEndpoint:                       r.String("otlpEndpoint"),
+		APILogLevel:                        r.String("ateapi.logLevel"),
+		BenchmarkActorMemory:               r.String("benchmark.actorMemory"),
+		PreviewGates:                       splitList(r.String("preview")),
+		kubeconfigEnv:                      kubeconfigEnv,
+		shellEnv:                           env,
+		resolved:                           r,
 	}
 
 	if err := validateResolved(cfg, r); err != nil {
@@ -444,9 +445,17 @@ func validateResolved(cfg *Config, r *Resolved) error {
 		if err := validateExtprocService(extproc); err != nil {
 			return err
 		}
+	}
+	if cfg.AdditionalEgressExtprocFiltersFile != "" {
+		filters, _ := r.Value("atenet.egress.additionalExtprocFiltersFile")
+		if cfg.AdditionalEgressExtprocService == "" {
+			extproc, _ := r.Value("atenet.egress.additionalExtprocService")
+			return &ConflictError{A: filters, B: extproc,
+				Why: "the filters dial the additional_egress_ext_proc cluster, which only an additional ext_proc service defines"}
+		}
 		if cfg.Router != RouterEnvoy {
-			return &ConflictError{A: extproc, B: dataplane,
-				Why: "an additional ext_proc filter requires dataplane " + RouterEnvoy}
+			return &ConflictError{A: filters, B: dataplane,
+				Why: "an additional ext_proc filters file requires dataplane " + RouterEnvoy}
 		}
 	}
 	// A gate the components do not know makes each of them refuse to start, so

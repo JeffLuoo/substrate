@@ -30,20 +30,21 @@ import (
 // Options carries the raw flag values the root command collects, before
 // defaulting and validation.
 type Options struct {
-	Kind                           bool
-	Kubeconfig                     string
-	Context                        string
-	Router                         string
-	RolloutTimeout                 string
-	PodcertWorkersPerSigner        int
-	EnvoyConcurrency               int
-	ClusterSize                    string
-	CordonSystemInfraComponents    bool
-	FakeDataPlane                  bool
-	E2ETuning                      bool
-	AdditionalEgressExtprocService string
-	CredentialProvider             string
-	OtlpEndpoint                   string
+	Kind                               bool
+	Kubeconfig                         string
+	Context                            string
+	Router                             string
+	RolloutTimeout                     string
+	PodcertWorkersPerSigner            int
+	EnvoyConcurrency                   int
+	ClusterSize                        string
+	CordonSystemInfraComponents        bool
+	FakeDataPlane                      bool
+	E2ETuning                          bool
+	AdditionalEgressExtprocService     string
+	AdditionalEgressExtprocFiltersFile string
+	CredentialProvider                 string
+	OtlpEndpoint                       string
 
 	// Image source selection.
 	ImageRepo string
@@ -90,6 +91,7 @@ func optionsFlagSet(opts Options) (*pflag.FlagSet, error) {
 		{"rollout-timeout", opts.RolloutTimeout},
 		{"cluster-size", opts.ClusterSize},
 		{"experimental-additional-egress-extproc-service", opts.AdditionalEgressExtprocService},
+		{"experimental-additional-egress-extproc-filters-file", opts.AdditionalEgressExtprocFiltersFile},
 		{"credential-provider", opts.CredentialProvider},
 		{"otlp-endpoint", opts.OtlpEndpoint},
 		{"image-repo", opts.ImageRepo},
